@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Authenticate with GitHub before cloning the private self-hosted AI assistant repo.
-# This script is intentionally distributed separately from the private repository.
+# Bootstrap the host, authenticate to GitHub, install Docker, and clone the private app.
 set -Eeuo pipefail
 IFS=$'\n\t'
+umask 077
 
 readonly REPOSITORY="plexosoft/self-hosted-ai-assistant"
 readonly GH_KEYRING_URL="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
-readonly GH_KEYRING_SHA256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
 readonly GH_REPO_URL="https://cli.github.com/packages"
+readonly DOCKER_GPG_URL="https://download.docker.com/linux/ubuntu/gpg"
+readonly DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
+INSTALL_USER="$(id -un)"
+DOCKER_GROUP_ACTIVE=0
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 fail() { printf '[bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
+command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 confirm() {
     local prompt="$1" reply
@@ -19,32 +23,44 @@ confirm() {
     [[ "$reply" =~ ^([yY]|[yY][eE][sS])$ ]]
 }
 
-command_exists() { command -v "$1" >/dev/null 2>&1; }
-
-install_gh_ubuntu() {
-    [[ -r /etc/os-release ]] || fail "Cannot identify this operating system. Install GitHub CLI manually: https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+require_ubuntu() {
+    [[ -r /etc/os-release ]] || fail "Cannot identify this operating system."
     # shellcheck disable=SC1091
     . /etc/os-release
-    [[ "${ID:-}" == "ubuntu" ]] || fail "Automatic GitHub CLI installation is supported only on Ubuntu. Install it manually: https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
-    command_exists apt-get || fail "apt-get is not available; install GitHub CLI manually."
-    command_exists dpkg || fail "dpkg is not available; install GitHub CLI manually."
-    command_exists curl || fail "curl is required to install GitHub CLI. Install curl and rerun this script."
-    command_exists sha256sum || fail "sha256sum is required to verify the GitHub CLI keyring."
-    command_exists sudo || fail "sudo is required to install GitHub CLI. Install it manually or configure sudo."
+    [[ "${ID:-}" == "ubuntu" ]] || fail "Automatic host setup supports Ubuntu only. Detected: ${PRETTY_NAME:-unknown}."
+    command_exists apt-get || fail "apt-get is unavailable."
+    command_exists dpkg || fail "dpkg is unavailable."
+    command_exists sudo || fail "sudo is required for host package installation."
+    [[ "${EUID:-$(id -u)}" -ne 0 ]] || fail "Do not run this bootstrap as root. Run it as your normal user."
+    [[ -n "${SUDO_USER:-}" ]] || true
+}
+
+install_base_tools() {
+    local missing=() package
+    for package in ca-certificates curl git; do
+        dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || missing+=("$package")
+    done
+    ((${#missing[@]} == 0)) && { log "Base tools are already installed."; return; }
+
+    log "Missing base packages: ${missing[*]}"
+    log "This step updates APT metadata and installs the missing packages."
+    confirm "Install required base packages?" || fail "Installation cancelled by user."
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl git
+}
+
+install_github_cli() {
+    command_exists gh && { log "GitHub CLI is already installed: $(gh --version | head -n 1)"; return; }
 
     log "GitHub CLI (gh) is missing. The installer will add GitHub's official APT repository and install gh."
-    log "This changes system APT configuration and installs a system package."
-    confirm "Continue with GitHub CLI installation?" || fail "Installation cancelled by user."
+    confirm "Install GitHub CLI from its official APT repository?" || fail "Installation cancelled by user."
 
     local tmp keyring_tmp arch
     tmp="$(mktemp -d)"
-    trap 'rm -rf "${tmp:-}"' EXIT
+    trap 'rm -rf "${tmp:-}"' RETURN
     keyring_tmp="$tmp/githubcli-archive-keyring.gpg"
-
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-        "$GH_KEYRING_URL" --output "$keyring_tmp" || fail "Could not download the official GitHub CLI APT keyring."
-    printf '%s  %s\n' "$GH_KEYRING_SHA256" "$keyring_tmp" | sha256sum --check --status \
-        || fail "GitHub CLI keyring checksum verification failed; refusing to install."
+        "$GH_KEYRING_URL" --output "$keyring_tmp" || fail "Could not download the GitHub CLI APT keyring."
 
     arch="$(dpkg --print-architecture)"
     sudo install -d -m 0755 /etc/apt/keyrings
@@ -57,51 +73,118 @@ install_gh_ubuntu() {
     log "Installed $(gh --version | head -n 1)."
 }
 
+
+ensure_docker_group_access() {
+    if ! getent group docker >/dev/null; then
+        sudo groupadd docker
+    fi
+
+    if id -nG | tr ' ' '\n' | grep -qx docker; then
+        DOCKER_GROUP_ACTIVE=1
+        return
+    fi
+
+    sudo usermod -aG docker "$INSTALL_USER"
+    DOCKER_GROUP_ACTIVE=0
+    log "Added ${INSTALL_USER} to the docker group."
+    log "Docker group access normally takes effect at the next login; bootstrap will use 'sg docker' for this installation run."
+}
+
+install_docker() {
+    if command_exists docker && docker compose version >/dev/null 2>&1; then
+        log "Docker and Docker Compose are already installed."
+        ensure_docker_group_access
+        return
+    fi
+
+    # Don't silently replace a distro-provided or third-party Docker installation.
+    local conflicts=() package
+    for package in docker.io docker-compose docker-compose-v2 docker-doc docker-buildx podman-docker containerd runc; do
+        if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+            conflicts+=("$package")
+        fi
+    done
+    ((${#conflicts[@]} == 0)) || fail "Potentially conflicting packages are installed: ${conflicts[*]}. Review Docker's official migration guidance before replacing them; bootstrap will not remove packages automatically."
+
+    [[ "${ID:-}" == "ubuntu" ]] || fail "Docker installation is supported only on Ubuntu."
+    local codename arch tmp
+    codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+    [[ -n "$codename" ]] || fail "Could not determine the Ubuntu codename."
+    arch="$(dpkg --print-architecture)"
+    log "Docker Engine and the Compose plugin are missing or incomplete."
+    log "The installer will add Docker's official APT repository for Ubuntu ${codename} (${arch}) and install Docker Engine."
+    log "The Docker group grants root-equivalent control of this machine to its members."
+    confirm "Install Docker Engine and configure access for the current user?" || fail "Installation cancelled by user."
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp:-}"' RETURN
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+        "$DOCKER_GPG_URL" --output "$tmp/docker.asc" || fail "Could not download Docker's official APT signing key."
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo install -m 0644 "$tmp/docker.asc" /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    printf 'Types: deb\nURIs: %s\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
+        "$DOCKER_REPO_URL" "$codename" "$arch" | sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null
+
+    sudo apt-get update
+    local docker_candidate
+    docker_candidate="$(apt-cache policy docker-ce | sed -n 's/^[[:space:]]*Candidate: //p')"
+    [[ -n "$docker_candidate" && "$docker_candidate" != "(none)" ]] ||
+        fail "Docker's repository has no installable docker-ce candidate for ${codename}/${arch}. No Docker packages were installed. Check the official support matrix and try again later."
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo systemctl enable --now docker
+
+    ensure_docker_group_access
+
+    sudo docker version >/dev/null || fail "Docker was installed but the daemon is not responding."
+    sudo docker compose version >/dev/null || fail "Docker Compose plugin is not available after installation."
+    log "Docker Engine and Docker Compose are installed."
+}
+
 main() {
-    [[ "${EUID:-$(id -u)}" -ne 0 ]] || fail "Do not run this bootstrap as root. Run it as your normal user; sudo will be requested only when needed."
-    command_exists git || fail "Git is required but is not installed. Install Git for your operating system, then rerun this script. On Ubuntu: sudo apt-get update && sudo apt-get install -y git"
-    command_exists curl || fail "curl is required. Install curl, then rerun this script."
-
-    if ! command_exists gh; then
-        install_gh_ubuntu
-    fi
-
-    local destination
-    destination="${BOOTSTRAP_DEST:-${HOME}/self-hosted-ai-assistant}"
-    # Expand a leading ~/ safely without evaluating arbitrary shell input.
-    if [[ "$destination" == '~/'* ]]; then
-        destination="${HOME}/${destination#~/}"
-    fi
+    require_ubuntu
+    install_base_tools
+    install_github_cli
 
     log "Checking GitHub CLI authentication..."
     if ! gh auth status --hostname github.com >/dev/null 2>&1; then
         log "No valid GitHub.com authentication was found. Starting interactive login."
         gh auth login --hostname github.com --git-protocol https --web
     fi
-    gh auth status --hostname github.com >/dev/null 2>&1 \
-        || fail "GitHub authentication is still unavailable. Run 'gh auth login' and retry."
+    gh auth status --hostname github.com >/dev/null 2>&1 || fail "GitHub authentication is unavailable. Run 'gh auth login' and retry."
 
-    log "Verifying access to ${REPOSITORY} before downloading its source..."
+    log "Verifying access to ${REPOSITORY} before installing Docker or cloning source..."
     local accessible_repository
     if ! accessible_repository="$(gh repo view "$REPOSITORY" --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"; then
-        fail "The authenticated GitHub account cannot access ${REPOSITORY}, or GitHub is unavailable. Check repository permissions and try again."
+        fail "The authenticated GitHub account cannot access ${REPOSITORY}, or GitHub is unavailable. Check repository permissions and try again. No Docker installation was attempted."
     fi
-    [[ "$accessible_repository" == "$REPOSITORY" ]] \
-        || fail "GitHub returned an unexpected repository identity; refusing to clone."
+    [[ "$accessible_repository" == "$REPOSITORY" ]] || fail "GitHub returned an unexpected repository identity; refusing to continue."
 
-    [[ ! -e "$destination" ]] \
-        || fail "Destination already exists: $destination. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
+    install_docker
+
+    local destination
+    destination="${BOOTSTRAP_DEST:-${HOME}/self-hosted-ai-assistant}"
+    if [[ "$destination" == '~/'* ]]; then
+        destination="${HOME}/${destination#~/}"
+    fi
+    [[ ! -e "$destination" ]] || fail "Destination already exists: $destination. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
     mkdir -p "$(dirname "$destination")"
 
-    log "Authentication and repository access verified. Cloning now..."
+    log "Cloning the private repository..."
     gh repo clone "$REPOSITORY" "$destination"
-
     [[ -d "$destination/.git" ]] || fail "Clone did not create a Git checkout at $destination."
-    [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout before continuing: $destination"
+    [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
 
     log "Repository cloned to: $destination"
-    if confirm "Run the repository installer now? This will start the local AI stack and may download container images and AI models."; then
-        (cd "$destination" && ./scripts/install.sh)
+    if confirm "Run the repository installer now? It will pull images, start services, and may download AI models."; then
+        if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
+            (cd "$destination" && ./scripts/install.sh)
+        else
+            # Refresh supplementary group membership for this child process only.
+            local quoted_destination
+            printf -v quoted_destination '%q' "$destination"
+            sg docker -c "cd ${quoted_destination} && exec ./scripts/install.sh"
+        fi
     else
         log "Installation skipped. To install later, run: cd '$destination' && ./scripts/install.sh"
     fi
