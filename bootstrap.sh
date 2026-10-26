@@ -142,6 +142,15 @@ install_docker() {
 }
 
 main() {
+    if [[ -n "${CODESPACES:-}" || -n "${CODESPACE_NAME:-}" ]]; then
+        fail "This bootstrap installs software on a host system and cannot run inside GitHub Codespaces."
+    fi
+
+    if [[ -f /.dockerenv ]] ||
+       grep -qaE '(docker|containerd|kubepods|podman|lxc)' /proc/1/cgroup 2>/dev/null; then
+        fail "Container environments are not supported. Run this bootstrap directly on the Ubuntu host."
+    fi
+
     require_ubuntu
     install_base_tools
     install_github_cli
