@@ -1,0 +1,1 @@
+# self-hosted-ai-assistant-installer
