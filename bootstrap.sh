@@ -73,7 +73,6 @@ install_github_cli() {
     log "Installed $(gh --version | head -n 1)."
 }
 
-
 ensure_docker_group_access() {
     if ! getent group docker >/dev/null; then
         sudo groupadd docker
@@ -141,6 +140,44 @@ install_docker() {
     log "Docker Engine and Docker Compose are installed."
 }
 
+authenticate_github() {
+    log "Checking GitHub CLI authentication..."
+
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+        log "Using the GitHub token supplied through GH_TOKEN."
+    elif gh auth status --hostname github.com >/dev/null 2>&1; then
+        log "Existing GitHub CLI authentication is available."
+    else
+        log "No valid GitHub.com authentication was found."
+        printf 'Choose a GitHub authentication method:\n'
+        printf '  1) Fine-grained personal access token (PAT)\n'
+        printf '  2) Browser/device authentication\n'
+
+        local auth_choice
+        read -r -p "Select [1/2]: " auth_choice
+
+        case "$auth_choice" in
+            1)
+                local entered_token
+                read -rsp "GitHub fine-grained token: " entered_token
+                printf '\n'
+                [[ -n "$entered_token" ]] || fail "No token supplied."
+                export GH_TOKEN="$entered_token"
+                unset entered_token
+                ;;
+            2)
+                gh auth login --hostname github.com --git-protocol https --web
+                ;;
+            *)
+                fail "Invalid authentication choice."
+                ;;
+        esac
+    fi
+
+    gh auth status --hostname github.com >/dev/null 2>&1 ||
+        fail "GitHub authentication failed. Check the token, repository access, and any organization approval requirements."
+}
+
 main() {
     if [[ -n "${CODESPACES:-}" || -n "${CODESPACE_NAME:-}" ]]; then
         fail "This bootstrap installs software on a host system and cannot run inside GitHub Codespaces."
@@ -155,12 +192,7 @@ main() {
     install_base_tools
     install_github_cli
 
-    log "Checking GitHub CLI authentication..."
-    if ! gh auth status --hostname github.com >/dev/null 2>&1; then
-        log "No valid GitHub.com authentication was found. Starting interactive login."
-        gh auth login --hostname github.com --git-protocol https --web
-    fi
-    gh auth status --hostname github.com >/dev/null 2>&1 || fail "GitHub authentication is unavailable. Run 'gh auth login' and retry."
+    authenticate_github
 
     log "Verifying access to ${REPOSITORY} before installing Docker or cloning source..."
     local accessible_repository
@@ -185,6 +217,10 @@ main() {
     [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
 
     log "Repository cloned to: $destination"
+
+    # Do not pass the supplied token into the application installer.
+    unset GH_TOKEN || true
+
     if confirm "Run the repository installer now? It will pull images, start services, and may download AI models."; then
         if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
             (cd "$destination" && ./scripts/install.sh)
