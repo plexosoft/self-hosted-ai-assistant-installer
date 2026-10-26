@@ -67,6 +67,7 @@ install_github_cli() {
     sudo install -m 0644 "$keyring_tmp" /etc/apt/keyrings/githubcli-archive-keyring.gpg
     printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] %s stable main\n' \
         "$arch" "$GH_REPO_URL" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+    sudo chmod 0644 /etc/apt/sources.list.d/github-cli.list
     sudo apt-get update
     sudo apt-get install -y gh
     command_exists gh || fail "GitHub CLI installation did not provide the gh command."
@@ -125,6 +126,7 @@ install_docker() {
     printf 'Types: deb\nURIs: %s\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
         "$DOCKER_REPO_URL" "$codename" "$arch" | sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null
 
+    sudo chmod 0644 /etc/apt/sources.list.d/docker.sources
     sudo apt-get update
     local docker_candidate
     docker_candidate="$(apt-cache policy docker-ce | sed -n 's/^[[:space:]]*Candidate: //p')"
