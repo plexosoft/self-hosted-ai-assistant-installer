@@ -6,6 +6,7 @@ umask 077
 
 readonly REPOSITORY="plexosoft/self-hosted-ai-assistant"
 readonly GH_KEYRING_URL="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+readonly GH_KEYRING_SHA256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
 readonly GH_REPO_URL="https://cli.github.com/packages"
 readonly DOCKER_GPG_URL="https://download.docker.com/linux/ubuntu/gpg"
 readonly DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
@@ -61,6 +62,8 @@ install_github_cli() {
     keyring_tmp="$tmp/githubcli-archive-keyring.gpg"
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
         "$GH_KEYRING_URL" --output "$keyring_tmp" || fail "Could not download the GitHub CLI APT keyring."
+    printf '%s  %s\n' "$GH_KEYRING_SHA256" "$keyring_tmp" | sha256sum --check --status ||
+        fail "The GitHub CLI APT keyring checksum does not match the pinned official checksum. Refusing to install it."
 
     arch="$(dpkg --print-architecture)"
     sudo install -d -m 0755 /etc/apt/keyrings
@@ -220,8 +223,23 @@ main() {
 
     log "Repository cloned to: $destination"
 
-    # Do not pass the supplied token into the application installer.
+    # Remove environment-based authentication before inspecting stored credentials.
+    # This does not modify the caller's parent shell environment.
     unset GH_TOKEN || true
+
+    # Log out any stored GitHub CLI account used on this host. This removes local
+    # gh authentication configuration; it does not revoke the token at GitHub.
+    local stored_github_user
+    stored_github_user="$(gh api user --jq .login 2>/dev/null || true)"
+    if [[ -n "$stored_github_user" ]]; then
+        if gh auth logout --hostname github.com --user "$stored_github_user"; then
+            log "Logged out of the stored GitHub CLI session for ${stored_github_user}."
+        else
+            log "WARNING: Could not remove the stored GitHub CLI session for ${stored_github_user}. Check it manually with: gh auth status --hostname github.com"
+        fi
+    else
+        log "No stored GitHub CLI session remains after removing GH_TOKEN from this process."
+    fi
 
     if confirm "Run the repository installer now? It will pull images, start services, and may download AI models."; then
         if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
