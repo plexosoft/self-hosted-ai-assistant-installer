@@ -6,18 +6,18 @@ This repository contains the public installation bootstrap. The application sour
 
 ## How It Works
 
-The bootstrap prepares your environment and verifies that your GitHub account can access the private application repository before downloading its source code.
+The bootstrap prepares your Ubuntu host and verifies that the supplied GitHub token can access the private application repository before installing Docker or downloading the application source.
 
 The installation process:
 
 1. Checks that the system is a supported Ubuntu environment and that the required system tools are available.
-2. Checks whether Git, `curl`, and other base tools are installed, offering to install missing dependencies when supported.
+2. Checks whether base tools such as `ca-certificates`, `curl`, and `git` are installed, offering to install missing dependencies when needed.
 3. Checks whether GitHub CLI (`gh`) is installed and offers to install it if necessary.
-4. Authenticates with GitHub using an existing CLI session, a personal access token, or an interactive browser login.
-5. Verifies access to the private application repository before installing Docker.
+4. Obtains a GitHub token from the `GH_TOKEN` environment variable or prompts you to enter one securely. A saved GitHub CLI login does not replace this token requirement.
+5. Validates the token and verifies access to the private application repository before installing Docker.
 6. Checks whether Docker and the Docker Compose plugin are available, offering to install Docker when necessary.
-7. Clones the application into your chosen destination.
-8. Attempts to clean up the GitHub authentication used by the bootstrap.
+7. Clones the application repository over HTTPS using a Git credential helper configured for that clone operation only.
+8. Unsets `GH_TOKEN` in the bootstrap process before offering to run the application installer. It does not log out of or remove a pre-existing GitHub CLI login.
 9. Asks whether to run the application installer.
 
 The bootstrap does not contain the application source code or grant repository access by itself.
@@ -31,6 +31,9 @@ The bootstrap requires:
 - `apt-get` and `dpkg`.
 - `sudo` access for system package installation.
 - A GitHub account with permission to access the private application repository.
+- A valid fine-grained GitHub personal access token (PAT), unless `GH_TOKEN` is supplied in the environment.
+
+The token should be restricted to `plexosoft/self-hosted-ai-assistant` and have **Repository permissions → Contents: Read-only**. Organization approval may also be required.
 
 The bootstrap must run as a nonroot user. It refuses to run in GitHub Codespaces and detects common container environments that are not supported.
 
@@ -46,7 +49,7 @@ The application repository is private. Before installation, make sure your GitHu
 
 Making this installer repository public does not make the application repository public or grant access to its contents.
 
-If authentication succeeds but the bootstrap reports that you cannot access the repository, contact the person who provided your application access.
+If token validation succeeds but the bootstrap reports that you cannot access the repository, verify the token's repository selection and permissions, any required organization approval, and the account's access to the repository. Contact the person who provided your application access if needed.
 
 ## Installation
 
@@ -78,18 +81,36 @@ The bootstrap checks the environment before proceeding. If required dependencies
 
 ### 4. Authenticate with GitHub
 
-The bootstrap supports these authentication methods:
+Unless `GH_TOKEN` is already set in the environment, the bootstrap prompts you to enter a fine-grained GitHub personal access token. Input is hidden while you type. This prompt appears even if the GitHub CLI already has a saved login, because the bootstrap explicitly requires a token for this run.
 
-- **Existing GitHub CLI session:** Uses an existing authenticated `gh` session when available.
-- **Personal access token:** Accepts a token through the `GH_TOKEN` environment variable.
-- **Interactive token entry:** Allows you to enter a personal access token securely when prompted.
-- **Browser login:** Allows you to authenticate through GitHub CLI's interactive web-based login.
+Create a fine-grained token with the following settings:
 
-Use the GitHub account that has access to `plexosoft/self-hosted-ai-assistant`.
+- **Resource owner:** the owner of `plexosoft/self-hosted-ai-assistant`.
+- **Repository access:** select `self-hosted-ai-assistant` only, if that meets your access requirements.
+- **Repository permissions → Contents:** Read-only.
+- **Expiration:** choose an expiration appropriate for your security requirements.
 
-If you use a personal access token, ensure it has the permissions required to access the private repository. For a fine-grained token, grant access to the relevant repository and provide read-only access to its contents. Follow any additional requirements imposed by your organization's GitHub policies.
+Follow any organization approval requirements. Do not grant unnecessary permissions.
 
-Never paste a personal access token into a public issue, chat, or terminal command that may be saved in shell history.
+#### Optional: provide the token through `GH_TOKEN`
+
+You can supply the token in the environment before launching the bootstrap. The following commands prompt for the token without displaying it or placing the value directly in shell history:
+
+```bash
+read -rsp "GitHub token: " GH_TOKEN
+printf '\n'
+export GH_TOKEN
+bash bootstrap.sh
+unset GH_TOKEN
+```
+
+The final `unset` removes the variable from your current shell after the bootstrap exits. The bootstrap itself also unsets `GH_TOKEN` in its own process before launching the application installer; it cannot modify the environment of the parent shell.
+
+Never commit tokens to Git, put them in source files, or include them in logs, screenshots, public issues, or support requests.
+
+#### Authentication and repository access checks
+
+The bootstrap validates the token and checks access to `plexosoft/self-hosted-ai-assistant` before installing Docker or cloning the source. If token validation fails or the authenticated account cannot access the repository, the bootstrap stops before Docker setup and cloning.
 
 ### 5. Install or configure Docker
 
@@ -103,7 +124,7 @@ Membership in the `docker` group effectively grants root-level privileges. Only 
 
 ### 6. Confirm application installation
 
-After cloning the private repository, the bootstrap asks whether to run the application installer.
+After cloning the private repository, the bootstrap verifies that the checkout contains a `.git` directory and that `scripts/install.sh` exists and is executable. It then asks whether to run the application installer.
 
 Review the prompt before confirming. The application installer may start containers and download container images and AI models.
 
@@ -123,14 +144,17 @@ To select another destination, set `BOOTSTRAP_DEST` when launching the bootstrap
 BOOTSTRAP_DEST="$HOME/my-ai-assistant" bash bootstrap.sh
 ```
 
-The destination must not already exist. The bootstrap will refuse to overwrite an existing path.
+The destination must not already exist. The bootstrap refuses to overwrite an existing path.
 
 ## Security
 
-- Never share your GitHub credentials or personal access tokens with anyone.
 - Review the bootstrap script before executing it.
-- Authenticate only through the supported GitHub CLI authentication methods.
-- The bootstrap verifies access to the private repository before cloning it.
+- Use a fine-grained token with only the repository access and permissions required for cloning.
+- The bootstrap validates the token and verifies access to the private repository before installing Docker or cloning it.
+- The application repository is cloned over HTTPS. The token is not embedded in the repository URL, and the bootstrap does not change your global Git credential-helper configuration.
+- The Git credential helper is configured for the clone command only.
+- The bootstrap unsets `GH_TOKEN` in its own process before launching the application installer.
+- The bootstrap does not revoke the token on GitHub, modify the parent shell's environment, or log out of or remove credentials from a pre-existing GitHub CLI login.
 - The bootstrap verifies the downloaded GitHub CLI APT keyring against a pinned SHA-256 checksum before using it.
 - Installing GitHub CLI or Docker can modify system APT configuration and install system packages. Review and confirm these operations before proceeding.
 - The bootstrap asks for confirmation before running the application installer.
@@ -139,19 +163,15 @@ The destination must not already exist. The bootstrap will refuse to overwrite a
 
 Access to the private repository is controlled separately by GitHub. Authorized users may be able to inspect or retain the source code they receive.
 
-### GitHub Credential Cleanup
+### GitHub Credential Handling
 
-After cloning the private application repository, the bootstrap unsets `GH_TOKEN` in its own process and attempts to log out the stored GitHub CLI account.
+The bootstrap uses the supplied `GH_TOKEN` or the token entered at its hidden interactive prompt for authentication and repository operations. It unsets `GH_TOKEN` in its own process before offering to start the application installer.
 
-This cleanup is intended to prevent the bootstrap's GitHub authentication from remaining available to subsequent installation steps.
+This reduces the chance that the application installer inherits the token through the environment, but it does not revoke the token or guarantee that no other process could access it while the bootstrap is running.
 
-However, there are important limitations:
+The bootstrap does **not** log out of a saved GitHub CLI session or delete credentials stored by the GitHub CLI. Any pre-existing GitHub CLI login remains available after the bootstrap finishes. Unsetting `GH_TOKEN` also does not change the parent shell's environment; if you exported it in your shell, run `unset GH_TOKEN` there when it is no longer needed.
 
-- Unsetting `GH_TOKEN` affects only the bootstrap process. It does not modify the environment of the parent shell or revoke the token at GitHub.
-- Logging out removes local GitHub CLI authentication for the account being logged out. It does not revoke a personal access token at GitHub.
-- If the bootstrap cannot identify or remove a stored authentication session, it may report a warning or be unable to verify the remaining authentication state.
-
-Do not assume that all GitHub credentials have been removed merely because the bootstrap completed successfully. Verify the remaining authentication state manually if necessary.
+Manage token permissions, expiration, and revocation through GitHub. Do not assume that all GitHub credentials have been removed when the bootstrap completes.
 
 ## Troubleshooting
 
@@ -167,35 +187,33 @@ The bootstrap offers to install GitHub CLI when it is missing and the system mee
 
 If you need to install it manually, follow the official GitHub CLI instructions:
 
-[GitHub CLI installation instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md?utm_source=chatgpt.com)
+[GitHub CLI installation instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
 
-### Authentication fails
+### Token validation fails
 
-Check the current GitHub CLI authentication status:
+- Check that the fine-grained token is valid and has not expired.
+- Verify that the token is configured for the correct resource owner and repository.
+- Verify that **Contents: Read-only** is granted.
+- Check whether organization approval is required.
+- If you use `GH_TOKEN`, verify that it is set in the shell from which you launch the bootstrap and that its value is correct.
 
-```bash
-gh auth status --hostname github.com
-```
-
-If necessary, authenticate interactively:
-
-```bash
-gh auth login --hostname github.com --git-protocol https --web
-```
-
-Rerun the bootstrap after authentication succeeds.
-
-If you previously supplied `GH_TOKEN`, check whether the environment variable is still set in your current shell. Remember that the bootstrap cannot unset variables in its parent shell.
+The bootstrap requires a token even if `gh auth status` reports an existing login. A saved GitHub CLI session alone is not sufficient.
 
 ### You cannot access the private repository
 
-Verify that you are using the correct GitHub account and that the account has been granted access to:
-
-`plexosoft/self-hosted-ai-assistant`
-
-Successful GitHub authentication does not necessarily mean that you have permission to access the private repository.
+Verify that the authenticated account has access to `plexosoft/self-hosted-ai-assistant` and that the token is authorized for that repository. Successful token validation does not necessarily mean the token can access the private repository.
 
 If access is still denied, contact the person who provided your repository access.
+
+### Cloning fails with an SSH public-key error
+
+The bootstrap is designed to clone the application repository over HTTPS using a Git credential helper configured for that clone operation. It does not rely on an SSH key for the clone.
+
+If you see an SSH public-key error, verify that you are running the updated `bootstrap.sh` and that the clone command uses the HTTPS URL and temporary GitHub CLI credential helper.
+
+### The application installer does not receive `GH_TOKEN`
+
+This is intentional. The bootstrap unsets `GH_TOKEN` in its own process before launching the application installer. It does not revoke the token or log out of an existing GitHub CLI session. If you supplied `GH_TOKEN` from your shell, the variable may still be set in that parent shell until you unset it yourself.
 
 ### Docker installation fails
 
@@ -238,19 +256,22 @@ self-hosted-ai-assistant-installer/
 
 ## Running Tests
 
-The test suite uses mocked GitHub CLI commands to exercise the bootstrap's authentication, repository access, cloning, and failure handling paths.
+The test suite uses mocked GitHub CLI, Git, Docker, and system-changing commands to exercise authentication, repository access, cloning, and failure-handling paths without intentionally changing the host system.
 
-Run it with:
+Run the syntax checks with:
 
 ```bash
 bash -n bootstrap.sh
 bash -n tests/test-bootstrap.sh
+```
+
+The integration-style test suite must be run as a nonroot user on a supported Ubuntu host or VM outside a container. It requires the `script` utility for pseudo-terminal testing:
+
+```bash
 bash tests/test-bootstrap.sh
 ```
 
-The test suite requires Bash and the `script` utility for pseudo-terminal testing. It must be run as a nonroot user.
-
-These tests do not authenticate against a live GitHub account or validate a real application installation.
+These tests do not authenticate against a live GitHub account or validate a real application installation. They use mocks and should be treated as automated regression tests, not as a substitute for reviewing the script or testing the full installation on a disposable supported host.
 
 ## Support
 
