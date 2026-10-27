@@ -146,41 +146,25 @@ install_docker() {
 }
 
 authenticate_github() {
-    log "Checking GitHub CLI authentication..."
+    log "GitHub authentication is required for ${REPOSITORY}."
 
-    if [[ -n "${GH_TOKEN:-}" ]]; then
-        log "Using the GitHub token supplied through GH_TOKEN."
-    elif gh auth status --hostname github.com >/dev/null 2>&1; then
-        log "Existing GitHub CLI authentication is available."
+    # Prefer an explicitly supplied token; otherwise prompt securely even if
+    # gh has a saved login. A saved login may use SSH or lack repository access.
+    if [[ -z "${GH_TOKEN:-}" ]]; then
+        [[ -t 0 ]] || fail "A fine-grained GitHub token is required. Run this script interactively or provide GH_TOKEN in the environment."
+        local entered_token
+        printf 'Create a fine-grained PAT with Contents: Read-only access to %s.\n' "$REPOSITORY"
+        read -rsp "GitHub fine-grained token: " entered_token
+        printf '\n'
+        [[ -n "$entered_token" ]] || fail "No token supplied."
+        export GH_TOKEN="$entered_token"
+        unset entered_token
     else
-        log "No valid GitHub.com authentication was found."
-        printf 'Choose a GitHub authentication method:\n'
-        printf '  1) Fine-grained personal access token (PAT)\n'
-        printf '  2) Browser/device authentication\n'
-
-        local auth_choice
-        read -r -p "Select [1/2]: " auth_choice
-
-        case "$auth_choice" in
-            1)
-                local entered_token
-                read -rsp "GitHub fine-grained token: " entered_token
-                printf '\n'
-                [[ -n "$entered_token" ]] || fail "No token supplied."
-                export GH_TOKEN="$entered_token"
-                unset entered_token
-                ;;
-            2)
-                gh auth login --hostname github.com --git-protocol https --web
-                ;;
-            *)
-                fail "Invalid authentication choice."
-                ;;
-        esac
+        log "Using the GitHub token supplied through GH_TOKEN."
     fi
 
     gh auth status --hostname github.com >/dev/null 2>&1 ||
-        fail "GitHub authentication failed. Check the token, repository access, and any organization approval requirements."
+        fail "GitHub token validation failed. Check that the token is valid, has access to ${REPOSITORY}, and has any required organization approval."
 }
 
 main() {
@@ -216,30 +200,23 @@ main() {
     [[ ! -e "$destination" ]] || fail "Destination already exists: $destination. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
     mkdir -p "$(dirname "$destination")"
 
-    log "Cloning the private repository..."
-    gh repo clone "$REPOSITORY" "$destination"
+    log "Cloning the private repository over HTTPS..."
+    # Do not use `gh repo clone` here: its configured git_protocol may be SSH,
+    # which fails on hosts that have a GitHub CLI/PAT login but no SSH key.
+    # Configure the credential helper for this Git invocation only so the
+    # current GH_TOKEN or stored gh authentication can authorize the HTTPS clone
+    # without embedding a token in the URL or changing global Git configuration.
+    git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+        clone "https://github.com/${REPOSITORY}.git" "$destination"
     [[ -d "$destination/.git" ]] || fail "Clone did not create a Git checkout at $destination."
     [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
 
     log "Repository cloned to: $destination"
 
-    # Remove environment-based authentication before inspecting stored credentials.
-    # This does not modify the caller's parent shell environment.
+    # A PAT entered for this run is kept only in this process environment.
+    # Clear it before launching the application installer. Do not log out a
+    # pre-existing gh account or alter the user's stored authentication.
     unset GH_TOKEN || true
-
-    # Log out any stored GitHub CLI account used on this host. This removes local
-    # gh authentication configuration; it does not revoke the token at GitHub.
-    local stored_github_user
-    stored_github_user="$(gh api user --jq .login 2>/dev/null || true)"
-    if [[ -n "$stored_github_user" ]]; then
-        if gh auth logout --hostname github.com --user "$stored_github_user"; then
-            log "Logged out of the stored GitHub CLI session for ${stored_github_user}."
-        else
-            log "WARNING: Could not remove the stored GitHub CLI session for ${stored_github_user}. Check it manually with: gh auth status --hostname github.com"
-        fi
-    else
-        log "No stored GitHub CLI session remains after removing GH_TOKEN from this process."
-    fi
 
     if confirm "Run the repository installer now? It will pull images, start services, and may download AI models."; then
         if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
