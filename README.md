@@ -1,6 +1,6 @@
-# Self-Hosted AI Assistant — Installer
+# Self Hosted AI Assistant Installer
 
-Bootstrap installer for Plexosoft's Self-Hosted AI Assistant.
+Bootstrap installer for Plexosoft's Self Hosted AI Assistant.
 
 This repository contains the public installation bootstrap. The application source code is maintained separately in a private repository.
 
@@ -10,30 +10,33 @@ The bootstrap prepares your environment and verifies that your GitHub account ca
 
 The installation process:
 
-1. Checks for Git and `curl`.
-2. Checks whether GitHub CLI (`gh`) is installed.
-3. On supported Ubuntu systems, offers to install GitHub CLI if it is missing.
-4. Checks your GitHub authentication status and starts an interactive login if necessary.
-5. Verifies access to the private application repository.
-6. Clones the application into your chosen destination.
-7. Asks whether to run the application installer.
+1. Checks that the system is a supported Ubuntu environment and that the required system tools are available.
+2. Checks whether Git, `curl`, and other base tools are installed, offering to install missing dependencies when supported.
+3. Checks whether GitHub CLI (`gh`) is installed and offers to install it if necessary.
+4. Authenticates with GitHub using an existing CLI session, a personal access token, or an interactive browser login.
+5. Verifies access to the private application repository before installing Docker.
+6. Checks whether Docker and the Docker Compose plugin are available, offering to install Docker when necessary.
+7. Clones the application into your chosen destination.
+8. Attempts to clean up the GitHub authentication used by the bootstrap.
+9. Asks whether to run the application installer.
 
 The bootstrap does not contain the application source code or grant repository access by itself.
 
 ## Requirements
 
-- A supported Linux environment.
+The bootstrap requires:
+
+- Ubuntu.
 - Bash.
-- Git.
-- `curl`.
+- `apt-get` and `dpkg`.
+- `sudo` access for system package installation.
 - A GitHub account with permission to access the private application repository.
-- GitHub CLI (`gh`), installed manually or through the supported Ubuntu installation flow.
 
-Automatic installation of GitHub CLI is supported only on Ubuntu systems with the required APT tools and `sudo` access.
+The bootstrap must run as a nonroot user. It refuses to run in GitHub Codespaces and detects common container environments that are not supported.
 
-On other operating systems, install GitHub CLI manually using the official instructions:
+The bootstrap can install missing base tools, GitHub CLI, and Docker after requesting confirmation where applicable.
 
-https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+Docker installation requires a supported Ubuntu environment and the ability to configure system packages and services.
 
 ## Getting Access
 
@@ -69,17 +72,38 @@ less bootstrap.sh
 bash bootstrap.sh
 ```
 
-Do not run the bootstrap as root. It requests `sudo` only when needed to install GitHub CLI on supported Ubuntu systems.
+Do not run the bootstrap as root. It uses `sudo` when necessary for system-level installation and configuration.
+
+The bootstrap checks the environment before proceeding. If required dependencies are missing, it explains the proposed changes and requests confirmation where applicable.
 
 ### 4. Authenticate with GitHub
 
-If GitHub CLI is not authenticated, the bootstrap starts an interactive web-based login.
+The bootstrap supports these authentication methods:
 
-Complete the authentication process using the GitHub account that has access to the private application repository.
+- **Existing GitHub CLI session:** Uses an existing authenticated `gh` session when available.
+- **Personal access token:** Accepts a token through the `GH_TOKEN` environment variable.
+- **Interactive token entry:** Allows you to enter a personal access token securely when prompted.
+- **Browser login:** Allows you to authenticate through GitHub CLI's interactive web-based login.
 
-### 5. Confirm installation
+Use the GitHub account that has access to `plexosoft/self-hosted-ai-assistant`.
 
-After the repository has been cloned, the bootstrap asks whether to run the application installer.
+If you use a personal access token, ensure it has the permissions required to access the private repository. For a fine-grained token, grant access to the relevant repository and provide read-only access to its contents. Follow any additional requirements imposed by your organization's GitHub policies.
+
+Never paste a personal access token into a public issue, chat, or terminal command that may be saved in shell history.
+
+### 5. Install or configure Docker
+
+The bootstrap checks whether Docker and the Docker Compose plugin are available.
+
+If Docker is missing or unusable, the bootstrap checks for conflicting packages before offering to install Docker using the official Docker Ubuntu APT repository.
+
+Review the proposed changes before confirming. Docker installation may modify system APT configuration, install system packages, enable the Docker service, and configure Docker group membership.
+
+Membership in the `docker` group effectively grants root-level privileges. Only add trusted users to this group.
+
+### 6. Confirm application installation
+
+After cloning the private repository, the bootstrap asks whether to run the application installer.
 
 Review the prompt before confirming. The application installer may start containers and download container images and AI models.
 
@@ -104,46 +128,80 @@ The destination must not already exist. The bootstrap will refuse to overwrite a
 ## Security
 
 - Never share your GitHub credentials or personal access tokens with anyone.
-- Authenticate through GitHub CLI's official login flow.
-- The bootstrap verifies access to the private repository before cloning.
-- The bootstrap checks the downloaded GitHub CLI APT keyring against a pinned SHA-256 checksum before using it.
-- Installing GitHub CLI on Ubuntu modifies system APT configuration and installs a system package; the bootstrap asks for confirmation first.
+- Review the bootstrap script before executing it.
+- Authenticate only through the supported GitHub CLI authentication methods.
+- The bootstrap verifies access to the private repository before cloning it.
+- The bootstrap verifies the downloaded GitHub CLI APT keyring against a pinned SHA-256 checksum before using it.
+- Installing GitHub CLI or Docker can modify system APT configuration and install system packages. Review and confirm these operations before proceeding.
 - The bootstrap asks for confirmation before running the application installer.
-- Review scripts before executing them and keep your operating system and dependencies updated.
+- Docker group membership effectively grants root-level privileges.
+- Keep your operating system and dependencies updated.
 
 Access to the private repository is controlled separately by GitHub. Authorized users may be able to inspect or retain the source code they receive.
 
+### GitHub Credential Cleanup
+
+After cloning the private application repository, the bootstrap unsets `GH_TOKEN` in its own process and attempts to log out the stored GitHub CLI account.
+
+This cleanup is intended to prevent the bootstrap's GitHub authentication from remaining available to subsequent installation steps.
+
+However, there are important limitations:
+
+- Unsetting `GH_TOKEN` affects only the bootstrap process. It does not modify the environment of the parent shell or revoke the token at GitHub.
+- Logging out removes local GitHub CLI authentication for the account being logged out. It does not revoke a personal access token at GitHub.
+- If the bootstrap cannot identify or remove a stored authentication session, it may report a warning or be unable to verify the remaining authentication state.
+
+Do not assume that all GitHub credentials have been removed merely because the bootstrap completed successfully. Verify the remaining authentication state manually if necessary.
+
 ## Troubleshooting
+
+### The environment is not supported
+
+The bootstrap is intended for supported Ubuntu systems. It refuses to run as root and does not support GitHub Codespaces or detected container environments.
+
+Run it from a supported Ubuntu host using a nonroot account with `sudo` access.
 
 ### GitHub CLI is missing
 
-On Ubuntu, the bootstrap offers to install it after requesting confirmation.
+The bootstrap offers to install GitHub CLI when it is missing and the system meets the installation requirements.
 
-On other systems, follow the official GitHub CLI installation instructions:
+If you need to install it manually, follow the official GitHub CLI instructions:
 
-https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+[GitHub CLI installation instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md?utm_source=chatgpt.com)
 
 ### Authentication fails
 
-Run:
-
-```bash
-gh auth login --hostname github.com
-```
-
-Then verify your authentication:
+Check the current GitHub CLI authentication status:
 
 ```bash
 gh auth status --hostname github.com
 ```
 
+If necessary, authenticate interactively:
+
+```bash
+gh auth login --hostname github.com --git-protocol https --web
+```
+
 Rerun the bootstrap after authentication succeeds.
+
+If you previously supplied `GH_TOKEN`, check whether the environment variable is still set in your current shell. Remember that the bootstrap cannot unset variables in its parent shell.
 
 ### You cannot access the private repository
 
-Verify that you are logged into the correct GitHub account and that the account has been granted access to:
+Verify that you are using the correct GitHub account and that the account has been granted access to:
 
 `plexosoft/self-hosted-ai-assistant`
+
+Successful GitHub authentication does not necessarily mean that you have permission to access the private repository.
+
+If access is still denied, contact the person who provided your repository access.
+
+### Docker installation fails
+
+Review the error output and check whether conflicting container packages are installed.
+
+The bootstrap stops rather than automatically removing conflicting packages. Resolve any package conflicts deliberately before rerunning it.
 
 ### The destination already exists
 
@@ -166,6 +224,8 @@ cd "$HOME/self-hosted-ai-assistant"
 
 If you selected a custom destination, substitute that path.
 
+If Docker group membership was newly configured during the bootstrap, you may need to start a new login session for the group change to take effect when running commands manually.
+
 ## Repository Layout
 
 ```text
@@ -178,7 +238,7 @@ self-hosted-ai-assistant-installer/
 
 ## Running Tests
 
-The test suite uses mocked GitHub CLI commands to exercise the bootstrap's authentication, repository-access, cloning, and failure-handling paths.
+The test suite uses mocked GitHub CLI commands to exercise the bootstrap's authentication, repository access, cloning, and failure handling paths.
 
 Run it with:
 
@@ -188,7 +248,7 @@ bash -n tests/test-bootstrap.sh
 bash tests/test-bootstrap.sh
 ```
 
-The test suite requires Bash and the `script` utility for pseudo-terminal testing. It must be run as a non-root user.
+The test suite requires Bash and the `script` utility for pseudo-terminal testing. It must be run as a nonroot user.
 
 These tests do not authenticate against a live GitHub account or validate a real application installation.
 
