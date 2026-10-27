@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check required test utilities
+        run: |
+          set -euo pipefail
+          command -v bash
+          command -v script
+          command -v grep
+
+      - name: Check shell script syntax
+        run: |
+          set -euo pipefail
+          bash -n bootstrap.sh
+          bash -n tests/test-bootstrap.sh
+
+      - name: Run bootstrap tests
+        run: |
+          set -euo pipefail
+          bash tests/test-bootstrap.sh
