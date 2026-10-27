@@ -274,7 +274,13 @@ run_bootstrap() {
     local status=0
 
     # A pseudo-terminal is needed because confirm() requires terminal stdin.
-    printf '%s' "$input" |
+    # Delay feeding input until the child has started and disabled terminal echo
+    # for the secret prompt. Otherwise script(1) can echo piped input before
+    # read -s runs, causing a false secret-leak failure in output.log.
+    {
+        sleep 0.5
+        printf '%s' "$input"
+    } |
         script -qec "bash '$BOOTSTRAP'" /dev/null > "$output" 2>&1 ||
         status=$?
     return "$status"
