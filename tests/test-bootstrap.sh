@@ -55,12 +55,18 @@ setup() {
     export PATH="$MOCK_BIN:/usr/bin:/bin"
 
     export MOCK_AUTH_STATUS=0
+    export MOCK_REQUIRE_TOKEN=yes
     export MOCK_AUTH_LOGIN_STATUS=0
     export MOCK_REPO_ACCESS=yes
     export MOCK_REPO_IDENTITY=plexosoft/self-hosted-ai-assistant
     export MOCK_CLONE_STATUS=0
-    export MOCK_LOGOUT_STATUS=0
-    export MOCK_STORED_USER=test-user
+    export MOCK_LATEST_TAG=v1.2.3
+    export MOCK_LATEST_RELEASE_STATUS=0
+    export MOCK_RELEASE_LOOKUP_STATUS=0
+    export MOCK_RELEASE_TAG=v1.1.0
+    export MOCK_RELEASE_DRAFT=false
+    export MOCK_RELEASE_PRERELEASE=false
+    export MOCK_CLONE_TAG=v1.2.3
     export MOCK_DOCKER_COMPOSE_STATUS=0
     export MOCK_DOCKER_GROUP_ACTIVE=yes
     export MOCK_INSTALLER_STATUS=0
@@ -72,7 +78,8 @@ make_mocks() {
     cat > "$MOCK_BIN/gh" <<'MOCK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-printf 'gh %s\n' "$*" >> "$MOCK_LOG"
+# Never log token values. Record only whether the environment variable exists.
+printf 'gh %s GH_TOKEN_%s\n' "$*" "$([[ -n "${GH_TOKEN:-}" ]] && printf PRESENT || printf ABSENT)" >> "$MOCK_LOG"
 
 if [[ "${1:-}" == "--version" ]]; then
     printf 'gh version 2.0.0 (mock)\n'
@@ -81,20 +88,13 @@ fi
 
 case "${1:-} ${2:-}" in
     "auth status")
+        if [[ "${MOCK_REQUIRE_TOKEN:-yes}" == yes && -z "${GH_TOKEN:-}" ]]; then
+            exit 1
+        fi
         exit "${MOCK_AUTH_STATUS:-0}"
         ;;
-    "auth login")
-        exit "${MOCK_AUTH_LOGIN_STATUS:-0}"
-        ;;
-    "auth logout")
-        exit "${MOCK_LOGOUT_STATUS:-0}"
-        ;;
-    "api user")
-        if [[ -n "${MOCK_STORED_USER:-}" ]]; then
-            printf '%s\n' "$MOCK_STORED_USER"
-            exit 0
-        fi
-        exit 1
+    "auth git-credential")
+        exit 0
         ;;
     "repo view")
         if [[ "${MOCK_REPO_ACCESS:-yes}" == yes ]]; then
@@ -103,21 +103,36 @@ case "${1:-} ${2:-}" in
         fi
         exit 1
         ;;
-    "repo clone")
-        if [[ "${MOCK_CLONE_STATUS:-0}" -ne 0 ]]; then
-            exit "$MOCK_CLONE_STATUS"
+    "api repos/plexosoft/self-hosted-ai-assistant/releases/latest")
+        if [[ "${MOCK_LATEST_RELEASE_STATUS:-0}" -ne 0 ]]; then
+            exit "$MOCK_LATEST_RELEASE_STATUS"
         fi
-        if [[ "${3:-}" != "plexosoft/self-hosted-ai-assistant" ]]; then
-            printf 'Unexpected repository: %s\n' "${3:-<missing>}" >&2
-            exit 91
+        printf '%s\n' "${MOCK_LATEST_TAG:-v1.2.3}"
+        ;;
+    "api repos/plexosoft/self-hosted-ai-assistant/releases/tags/v1.1.0")
+        if [[ "${MOCK_RELEASE_LOOKUP_STATUS:-0}" -ne 0 ]]; then
+            exit "$MOCK_RELEASE_LOOKUP_STATUS"
         fi
-        if [[ "${4:-}" != "$BOOTSTRAP_DEST" ]]; then
-            printf 'Unexpected clone destination: %s\n' "${4:-<missing>}" >&2
-            exit 92
-        fi
+        printf '%s\t%s\t%s\n' "${MOCK_RELEASE_TAG:-v1.1.0}" "${MOCK_RELEASE_DRAFT:-false}" "${MOCK_RELEASE_PRERELEASE:-false}"
+        ;;
+    *)
+        printf 'Unexpected gh invocation: %s\n' "$*" >&2
+        exit 2
+        ;;
+esac
+MOCK
 
-        mkdir -p "$4/.git" "$4/scripts"
-        cat > "$4/scripts/install.sh" <<'INSTALL'
+    cat > "$MOCK_BIN/git" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'git %s\n' "$*" >> "$MOCK_LOG"
+if [[ "${1:-}" == -c && "${2:-}" == credential.helper= && "${3:-}" == '-c' && "${4:-}" == 'credential.helper=!gh auth git-credential' && "${5:-}" == clone ]]; then
+    [[ "${6:-}" == --branch && "${7:-}" == "${MOCK_CLONE_TAG:-v1.2.3}" && "${8:-}" == --single-branch ]] || exit 93
+    [[ "${9:-}" == 'https://github.com/plexosoft/self-hosted-ai-assistant.git' ]] || exit 94
+    [[ -n "${10:-}" && "${10:-}" == "$BOOTSTRAP_DEST" ]] || exit 95
+    if [[ "${MOCK_CLONE_STATUS:-0}" -ne 0 ]]; then exit "$MOCK_CLONE_STATUS"; fi
+    mkdir -p "${10}/.git" "${10}/scripts"
+    cat > "${10}/scripts/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'installer ran\n' >> "$MOCK_LOG"
@@ -128,14 +143,16 @@ else
 fi
 exit "${MOCK_INSTALLER_STATUS:-0}"
 INSTALL
-        chmod +x "$4/scripts/install.sh"
-        printf 'mock clone completed\n' >> "$MOCK_LOG"
-        ;;
-    *)
-        printf 'Unexpected gh invocation: %s\n' "$*" >&2
-        exit 2
-        ;;
-esac
+    chmod +x "${10}/scripts/install.sh"
+    printf 'mock clone completed\n' >> "$MOCK_LOG"
+    exit 0
+fi
+if [[ "${1:-}" == -C && "${3:-}" == describe ]]; then
+    printf '%s\n' "${MOCK_CLONE_TAG:-v1.2.3}"
+    exit 0
+fi
+printf 'Unexpected git invocation: %s\n' "$*" >&2
+exit 92
 MOCK
 
     cat > "$MOCK_BIN/docker" <<'MOCK'
@@ -273,33 +290,43 @@ assert_failure() {
 
 run_bootstrap() {
     local input="$1"
+    local args="${2:-}"
     local output="$CASE_DIR/output.log"
     local status=0
 
     # A pseudo-terminal is needed because confirm() requires terminal stdin.
-    printf '%s' "$input" |
-        script -qec "bash '$BOOTSTRAP'" /dev/null > "$output" 2>&1 ||
+    # Delay feeding input until the child has started and disabled terminal echo
+    # for the secret prompt. Otherwise script(1) can echo piped input before
+    # read -s runs, causing a false secret-leak failure in output.log.
+    {
+        sleep 0.5
+        printf '%s' "$input"
+    } |
+        script -qec "bash '$BOOTSTRAP' $args" /dev/null > "$output" 2>&1 ||
         status=$?
     return "$status"
 }
 
-test_clone_and_skip_install() {
-    echo "== Existing gh session: clone succeeds; app install is declined =="
-    setup clone-skip
-
+test_prompted_token_and_https_clone() {
+    echo "== Prompts for a token and clones over HTTPS even when gh has a saved session =="
+    setup prompted-token
+    export MOCK_AUTH_STATUS=0
+    local token='test-token-do-not-print'
     local status=0
-    run_bootstrap $'n\n' || status=$?
+    run_bootstrap "$token"$'\nn\n' || status=$?
 
     assert_success "bootstrap succeeds after declining application installation" "$status"
-    assert_contains "$MOCK_LOG" "gh repo view plexosoft/self-hosted-ai-assistant --json nameWithOwner --jq .nameWithOwner"
-    assert_contains "$MOCK_LOG" "gh repo clone plexosoft/self-hosted-ai-assistant $BOOTSTRAP_DEST"
-    assert_contains "$MOCK_LOG" "gh api user --jq .login"
-    assert_contains "$MOCK_LOG" "gh auth logout --hostname github.com --user test-user"
+    assert_contains "$CASE_DIR/output.log" "GitHub fine-grained token:"
+    assert_contains "$MOCK_LOG" "gh auth status --hostname github.com GH_TOKEN_PRESENT"
+    assert_contains "$MOCK_LOG" "gh repo view plexosoft/self-hosted-ai-assistant --json nameWithOwner --jq .nameWithOwner GH_TOKEN_PRESENT"
+    assert_contains "$MOCK_LOG" "gh api repos/plexosoft/self-hosted-ai-assistant/releases/latest --jq .tag_name GH_TOKEN_PRESENT"
+    assert_contains "$MOCK_LOG" "git -c credential.helper= -c credential.helper=!gh auth git-credential clone --branch v1.2.3 --single-branch https://github.com/plexosoft/self-hosted-ai-assistant.git $BOOTSTRAP_DEST"
+    assert_contains "$CASE_DIR/output.log" "Selected stable release: v1.2.3"
     assert_contains "$MOCK_LOG" "mock clone completed"
-    assert_not_contains "$MOCK_LOG" "installer ran"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-    assert_contains "$CASE_DIR/output.log" "Repository cloned to:"
     assert_contains "$CASE_DIR/output.log" "Installation skipped"
+    assert_not_contains "$MOCK_LOG" "$token"
+    assert_not_contains "$CASE_DIR/output.log" "$token"
+    assert_not_contains "$MOCK_LOG" "gh auth logout"
 
     if [[ -d "$BOOTSTRAP_DEST/.git" && -x "$BOOTSTRAP_DEST/scripts/install.sh" ]]; then
         printf '  PASS: checkout exists and installer is executable\n'
@@ -310,22 +337,47 @@ test_clone_and_skip_install() {
     fi
 }
 
-test_token_is_not_passed_to_installer() {
-    echo "== GH_TOKEN is not inherited by the application installer =="
-    setup token-cleanup
-    export GH_TOKEN="test-token-do-not-print"
-    export MOCK_STORED_USER=""
-
+test_invalid_token_stops_early() {
+    echo "== Invalid token prevents repository access, Docker setup, and cloning =="
+    setup invalid-token
+    export MOCK_AUTH_STATUS=1
     local status=0
-    run_bootstrap $'y\n' || status=$?
-    unset GH_TOKEN
+    run_bootstrap $'bad-token\n' || status=$?
 
-    assert_success "bootstrap and mock installer complete successfully" "$status"
-    assert_contains "$MOCK_LOG" "installer ran"
-    assert_contains "$MOCK_LOG" "GH_TOKEN_ABSENT in installer"
-    assert_not_contains "$MOCK_LOG" "GH_TOKEN_PRESENT in installer"
-    assert_contains "$CASE_DIR/output.log" "No stored GitHub CLI session remains"
+    assert_failure "bootstrap fails when token validation fails" "$status"
+    assert_contains "$CASE_DIR/output.log" "GitHub token validation failed"
+    assert_not_contains "$MOCK_LOG" "gh repo view"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
+    assert_not_contains "$MOCK_LOG" "bad-token"
+    assert_not_contains "$CASE_DIR/output.log" "bad-token"
+}
+
+test_repository_access_failure() {
+    echo "== Repository access failure stops before Docker setup and clone =="
+    setup repository-access-failure
+    export MOCK_REPO_ACCESS=no
+    local status=0
+    run_bootstrap $'valid-token\n' || status=$?
+
+    assert_failure "bootstrap fails when repository access is denied" "$status"
+    assert_contains "$CASE_DIR/output.log" "cannot access"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
     assert_not_contains "$MOCK_LOG" "BLOCKED"
+}
+
+test_unexpected_repository_identity() {
+    echo "== Unexpected repository identity stops installation =="
+    setup unexpected-repository
+    export MOCK_REPO_IDENTITY="someone-else/different-repository"
+    local status=0
+    run_bootstrap $'valid-token\n' || status=$?
+
+    assert_failure "bootstrap rejects an unexpected repository identity" "$status"
+    assert_contains "$CASE_DIR/output.log" "unexpected repository identity"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
 }
 
 test_existing_destination() {
@@ -333,16 +385,13 @@ test_existing_destination() {
     setup existing-destination
     mkdir -p "$BOOTSTRAP_DEST"
     printf 'keep this file\n' > "$BOOTSTRAP_DEST/keep.txt"
-
     local status=0
-    run_bootstrap "" || status=$?
+    run_bootstrap $'valid-token\n' || status=$?
 
-    assert_failure "bootstrap rejects an existing destination" "$status"
+    assert_failure "bootstrap rejects the existing destination" "$status"
     assert_contains "$CASE_DIR/output.log" "Destination already exists"
-    assert_not_contains "$MOCK_LOG" "gh repo clone"
-
-    if [[ -f "$BOOTSTRAP_DEST/keep.txt" ]] &&
-       [[ "$(cat "$BOOTSTRAP_DEST/keep.txt")" == "keep this file" ]]; then
+    assert_not_contains "$MOCK_LOG" "git -c"
+    if [[ -f "$BOOTSTRAP_DEST/keep.txt" ]] && [[ "$(cat "$BOOTSTRAP_DEST/keep.txt")" == "keep this file" ]]; then
         printf '  PASS: existing destination contents were preserved\n'
         PASS=$((PASS + 1))
     else
@@ -351,80 +400,17 @@ test_existing_destination() {
     fi
 }
 
-test_authentication_failure() {
-    echo "== Failed browser authentication prevents cloning =="
-    setup authentication-failure
-    export MOCK_AUTH_STATUS=1
-    export MOCK_AUTH_LOGIN_STATUS=1
-
-    local status=0
-    run_bootstrap $'2\n' || status=$?
-
-    assert_failure "bootstrap fails when authentication fails" "$status"
-    assert_contains "$MOCK_LOG" "gh auth login --hostname github.com --git-protocol https --web"
-    assert_not_contains "$MOCK_LOG" "gh repo view"
-    assert_not_contains "$MOCK_LOG" "gh repo clone"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-}
-
-test_repository_access_failure() {
-    echo "== Repository access failure prevents Docker setup and cloning =="
-    setup repository-access-failure
-    export MOCK_REPO_ACCESS=no
-
-    local status=0
-    run_bootstrap "" || status=$?
-
-    assert_failure "bootstrap fails when repository access is denied" "$status"
-    assert_contains "$CASE_DIR/output.log" "cannot access"
-    assert_not_contains "$MOCK_LOG" "docker compose version"
-    assert_not_contains "$MOCK_LOG" "gh repo clone"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-}
-
-test_unexpected_repository_identity() {
-    echo "== Unexpected repository identity stops installation =="
-    setup unexpected-repository
-    export MOCK_REPO_IDENTITY="someone-else/different-repository"
-
-    local status=0
-    run_bootstrap "" || status=$?
-
-    assert_failure "bootstrap rejects an unexpected repository identity" "$status"
-    assert_contains "$CASE_DIR/output.log" "unexpected repository identity"
-    assert_not_contains "$MOCK_LOG" "docker compose version"
-    assert_not_contains "$MOCK_LOG" "gh repo clone"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-}
-
-test_docker_declined() {
-    echo "== Missing Docker: declining installation stops before cloning =="
-    setup docker-declined
-    export MOCK_DOCKER_COMPOSE_STATUS=1
-
-    local status=0
-    run_bootstrap $'n\n' || status=$?
-
-    assert_failure "bootstrap stops when Docker installation is declined" "$status"
-    assert_contains "$CASE_DIR/output.log" "Installation cancelled by user"
-    assert_not_contains "$MOCK_LOG" "gh repo clone"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-}
-
 test_clone_failure() {
-    echo "== Clone failure is reported and installer is not run =="
+    echo "== HTTPS clone failure is reported =="
     setup clone-failure
     export MOCK_CLONE_STATUS=1
-
     local status=0
-    run_bootstrap $'y\n' || status=$?
+    run_bootstrap $'valid-token\n' || status=$?
 
     assert_failure "bootstrap fails when cloning fails" "$status"
-    assert_contains "$MOCK_LOG" "gh repo clone plexosoft/self-hosted-ai-assistant $BOOTSTRAP_DEST"
+    assert_contains "$MOCK_LOG" "git -c credential.helper= -c credential.helper=!gh auth git-credential clone --branch v1.2.3 --single-branch https://github.com/plexosoft/self-hosted-ai-assistant.git $BOOTSTRAP_DEST"
     assert_not_contains "$MOCK_LOG" "installer ran"
     assert_not_contains "$CASE_DIR/output.log" "Repository cloned to:"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
-
     if [[ ! -e "$BOOTSTRAP_DEST" ]]; then
         printf '  PASS: failed clone did not create a checkout\n'
         PASS=$((PASS + 1))
@@ -434,41 +420,120 @@ test_clone_failure() {
     fi
 }
 
-test_logout_failure_is_reported() {
-    echo "== Stored GitHub logout failure is reported =="
-    setup logout-failure
-    export MOCK_LOGOUT_STATUS=1
+test_specific_stable_release_override() {
+    echo "== Explicit version selects and validates the requested stable release =="
+    setup version-override
+    export MOCK_CLONE_TAG=v1.1.0
+    local status=0
+    run_bootstrap $'valid-token\nn\n' "--version v1.1.0" || status=$?
+    assert_success "bootstrap accepts a published stable version override" "$status"
+    assert_contains "$MOCK_LOG" "gh api repos/plexosoft/self-hosted-ai-assistant/releases/tags/v1.1.0"
+    assert_contains "$MOCK_LOG" "clone --branch v1.1.0 --single-branch"
+    assert_contains "$CASE_DIR/output.log" "Selected stable release: v1.1.0"
+}
 
+test_prerelease_override_rejected() {
+    echo "== Prereleases cannot be selected for production installation =="
+    setup prerelease-override
+    export MOCK_RELEASE_PRERELEASE=true
+    local status=0
+    run_bootstrap $'valid-token\n' "--version v1.1.0" || status=$?
+    assert_failure "bootstrap rejects a prerelease version" "$status"
+    assert_contains "$CASE_DIR/output.log" "is a prerelease"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
+}
+
+test_draft_override_rejected() {
+    echo "== Draft releases cannot be selected for production installation =="
+    setup draft-override
+    export MOCK_RELEASE_DRAFT=true
+    local status=0
+    run_bootstrap $'valid-token\n' "--version v1.1.0" || status=$?
+    assert_failure "bootstrap rejects a draft release" "$status"
+    assert_contains "$CASE_DIR/output.log" "is a draft"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
+}
+
+test_missing_latest_release_rejected() {
+    echo "== Missing stable release prevents cloning =="
+    setup no-latest-release
+    export MOCK_LATEST_RELEASE_STATUS=1
+    local status=0
+    run_bootstrap $'valid-token\n' || status=$?
+    assert_failure "bootstrap fails when no stable release exists" "$status"
+    assert_contains "$CASE_DIR/output.log" "No published stable release"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
+}
+
+test_invalid_version_format_rejected() {
+    echo "== Invalid version argument is rejected =="
+    setup invalid-version
+    local status=0
+    run_bootstrap $'valid-token\n' "--version ../main" || status=$?
+    assert_failure "bootstrap rejects an unsafe release tag" "$status"
+    assert_contains "$CASE_DIR/output.log" "Invalid release tag format"
+    assert_not_contains "$MOCK_LOG" "docker compose version"
+    assert_not_contains "$MOCK_LOG" "git -c"
+}
+
+test_token_not_passed_to_installer() {
+    echo "== Token is cleared before application installer runs =="
+    setup token-cleanup
+    local status=0
+    run_bootstrap $'test-token-do-not-print\ny\n' || status=$?
+
+    assert_success "bootstrap and mock installer complete successfully" "$status"
+    assert_contains "$MOCK_LOG" "installer ran"
+    assert_contains "$MOCK_LOG" "GH_TOKEN_ABSENT in installer"
+    assert_not_contains "$MOCK_LOG" "GH_TOKEN_PRESENT in installer"
+    assert_not_contains "$MOCK_LOG" "test-token-do-not-print"
+    assert_not_contains "$CASE_DIR/output.log" "test-token-do-not-print"
+}
+
+test_environment_token() {
+    echo "== GH_TOKEN environment path works and is cleared before installer =="
+    setup environment-token
+    export GH_TOKEN='environment-token-do-not-print'
     local status=0
     run_bootstrap $'n\n' || status=$?
+    unset GH_TOKEN
 
-    assert_success "logout failure does not prevent the declined-install path from finishing" "$status"
-    assert_contains "$CASE_DIR/output.log" "WARNING: Could not remove the stored GitHub CLI session"
-    assert_not_contains "$MOCK_LOG" "BLOCKED"
+    assert_success "bootstrap accepts GH_TOKEN and skips installation" "$status"
+    assert_contains "$CASE_DIR/output.log" "Using the GitHub token supplied through GH_TOKEN"
+    assert_contains "$MOCK_LOG" "GH_TOKEN_PRESENT"
+    assert_not_contains "$MOCK_LOG" "environment-token-do-not-print"
+    assert_not_contains "$CASE_DIR/output.log" "environment-token-do-not-print"
 }
 
 test_installer_failure_propagates() {
     echo "== Application installer failure is propagated =="
     setup installer-failure
     export MOCK_INSTALLER_STATUS=7
-
     local status=0
-    run_bootstrap $'y\n' || status=$?
+    run_bootstrap $'valid-token\ny\n' || status=$?
 
     assert_failure "bootstrap reports an application installer failure" "$status"
     assert_contains "$MOCK_LOG" "installer ran"
+    assert_contains "$MOCK_LOG" "GH_TOKEN_ABSENT in installer"
     assert_not_contains "$MOCK_LOG" "BLOCKED"
 }
 
-test_clone_and_skip_install
-test_token_is_not_passed_to_installer
-test_existing_destination
-test_authentication_failure
+test_prompted_token_and_https_clone
+test_invalid_token_stops_early
 test_repository_access_failure
 test_unexpected_repository_identity
-test_docker_declined
+test_existing_destination
 test_clone_failure
-test_logout_failure_is_reported
+test_specific_stable_release_override
+test_prerelease_override_rejected
+test_draft_override_rejected
+test_missing_latest_release_rejected
+test_invalid_version_format_rejected
+test_token_not_passed_to_installer
+test_environment_token
 test_installer_failure_propagates
 
 printf '\nResults: %d passed, %d failed\n' "$PASS" "$FAIL"
