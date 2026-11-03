@@ -308,15 +308,35 @@ main() {
     mkdir -p "$(dirname "$destination")"
 
     log "Cloning the private repository over HTTPS..."
-    # Do not use `gh repo clone` here: its configured git_protocol may be SSH,
-    # which fails on hosts that have a GitHub CLI/PAT login but no SSH key.
-    # Configure the credential helper for this Git invocation only so the
-    # current GH_TOKEN or stored gh authentication can authorize the HTTPS clone
-    # without embedding a token in the URL or changing global Git configuration.
+
+    # Do not use `gh repo clone` here: its configured git_protocol may be SSH.
+    # Configure the credential helper for this Git invocation only.
     git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-        clone --branch "$release_tag" --single-branch \
+        clone --no-checkout \
         "https://github.com/${REPOSITORY}.git" "$destination"
-    [[ -d "$destination/.git" ]] || fail "Clone did not create a Git checkout at $destination."
+
+    [[ -d "$destination/.git" ]] ||
+        fail "Clone did not create a Git checkout at $destination."
+
+    log "Fetching the selected release tag..."
+
+    git -c credential.helper= \
+        -c 'credential.helper=!gh auth git-credential' \
+        -C "$destination" fetch --force origin \
+        "refs/tags/${release_tag}:refs/tags/${release_tag}" ||
+        fail "Could not fetch release tag ${release_tag}."
+
+    local release_commit
+    release_commit="$(git -C "$destination" rev-parse "${release_tag}^{commit}")" ||
+        fail "Could not resolve release tag ${release_tag} to a commit."
+
+    [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "Resolved release tag does not point to a valid commit."
+
+    log "Checking out release ${release_tag} at ${release_commit}..."
+
+    git -C "$destination" checkout --detach "$release_commit" ||
+        fail "Could not check out release commit ${release_commit}."
 
     local checked_out_tag
     if ! checked_out_tag="$(git -C "$destination" describe --tags --exact-match HEAD 2>/dev/null)"; then
@@ -356,7 +376,7 @@ main() {
     fi
 
     [[ -x "$destination/scripts/install.sh" ]] ||
-        fail "scripts/install.sh is still not executable: $destination""$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
+        fail "scripts/install.sh is still not executable: $destination/scripts/install.sh"
 
     log "Repository release ${release_tag} cloned to: $destination"
 
