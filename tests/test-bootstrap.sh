@@ -60,13 +60,16 @@ setup() {
     export MOCK_REPO_ACCESS=yes
     export MOCK_REPO_IDENTITY=plexosoft/self-hosted-ai-assistant
     export MOCK_CLONE_STATUS=0
+
     export MOCK_LATEST_TAG=v1.2.3
+    export MOCK_STABLE_TAG=v1.1.0
+    export MOCK_CLONE_TAG="$MOCK_LATEST_TAG"
+
     export MOCK_LATEST_RELEASE_STATUS=0
     export MOCK_RELEASE_LOOKUP_STATUS=0
-    export MOCK_RELEASE_TAG=v1.1.0
     export MOCK_RELEASE_DRAFT=false
     export MOCK_RELEASE_PRERELEASE=false
-    export MOCK_CLONE_TAG=v1.2.3
+
     export MOCK_DOCKER_COMPOSE_STATUS=0
     export MOCK_DOCKER_GROUP_ACTIVE=yes
     export MOCK_INSTALLER_STATUS=0
@@ -109,11 +112,15 @@ case "${1:-} ${2:-}" in
         fi
         printf '%s\n' "${MOCK_LATEST_TAG:-v1.2.3}"
         ;;
-    "api repos/plexosoft/self-hosted-ai-assistant/releases/tags/v1.1.0")
+    "api repos/plexosoft/self-hosted-ai-assistant/releases/tags/${MOCK_STABLE_TAG}")
         if [[ "${MOCK_RELEASE_LOOKUP_STATUS:-0}" -ne 0 ]]; then
             exit "$MOCK_RELEASE_LOOKUP_STATUS"
         fi
-        printf '%s\t%s\t%s\n' "${MOCK_RELEASE_TAG:-v1.1.0}" "${MOCK_RELEASE_DRAFT:-false}" "${MOCK_RELEASE_PRERELEASE:-false}"
+
+        printf '%s\t%s\t%s\n' \
+            "$MOCK_STABLE_TAG" \
+            "${MOCK_RELEASE_DRAFT:-false}" \
+            "${MOCK_RELEASE_PRERELEASE:-false}"
         ;;
     *)
         printf 'Unexpected gh invocation: %s\n' "$*" >&2
@@ -128,27 +135,34 @@ set -Eeuo pipefail
 
 printf 'git %s\n' "$*" >> "$MOCK_LOG"
 
-# Mock HTTPS clone.
-if [[ "${1:-}" == -c &&
-      "${2:-}" == credential.helper= &&
-      "${3:-}" == '-c' &&
-      "${4:-}" == 'credential.helper=!gh auth git-credential' &&
-      "${5:-}" == clone ]]; then
+# Mock HTTPS clone using an explicitly fetched release tag.
+args=("$@")
+clone_index=-1
 
-    [[ "${6:-}" == --branch &&
-       "${7:-}" == "${MOCK_CLONE_TAG:-v1.2.3}" &&
-       "${8:-}" == --single-branch ]] || exit 93
+for i in "${!args[@]}"; do
+    if [[ "${args[$i]}" == "clone" ]]; then
+        clone_index="$i"
+        break
+    fi
+done
 
-    [[ "${9:-}" == 'https://github.com/plexosoft/self-hosted-ai-assistant.git' ]] || exit 94
-    [[ -n "${10:-}" && "${10:-}" == "$BOOTSTRAP_DEST" ]] || exit 95
+if [[ "$clone_index" -ge 0 ]]; then
+    [[ "${args[$((clone_index + 1))]:-}" == "--no-checkout" ]] || exit 93
+
+    [[ "${args[$((clone_index + 2))]:-}" == \
+        "https://github.com/plexosoft/self-hosted-ai-assistant.git" ]] || exit 94
+
+    destination="${args[$((clone_index + 3))]:-}"
+
+    [[ -n "$destination" && "$destination" == "$BOOTSTRAP_DEST" ]] || exit 95
 
     if [[ "${MOCK_CLONE_STATUS:-0}" -ne 0 ]]; then
         exit "$MOCK_CLONE_STATUS"
     fi
 
-    mkdir -p "${10}/.git" "${10}/scripts"
+    mkdir -p "$destination/.git" "$destination/scripts"
 
-    cat > "${10}/scripts/install.sh" <<'INSTALL'
+    cat > "$destination/scripts/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -163,18 +177,33 @@ fi
 exit "${MOCK_INSTALLER_STATUS:-0}"
 INSTALL
 
-    # Simulate either correct or incorrect executable permissions.
     if [[ "${MOCK_INSTALLER_EXECUTABLE:-yes}" == yes ]]; then
-        chmod +x "${10}/scripts/install.sh"
+        chmod +x "$destination/scripts/install.sh"
     else
-        chmod 600 "${10}/scripts/install.sh"
+        chmod 600 "$destination/scripts/install.sh"
     fi
 
     printf 'mock clone completed\n' >> "$MOCK_LOG"
     exit 0
 fi
 
-# Mock release tag validation.
+# Simulate fetching the selected release tag.
+if [[ "${args[*]}" == *"fetch --force origin refs/tags/"* ]]; then
+    exit 0
+fi
+
+# Simulate detached checkout of the resolved release commit.
+if [[ "${args[*]}" == *"checkout --detach "* ]]; then
+    exit 0
+fi
+
+# Simulate resolving an annotated or lightweight release tag to its commit.
+if [[ "${args[*]}" == *"rev-parse"*"^{commit}"* ]]; then
+    printf '%s\n' '0123456789abcdef0123456789abcdef01234567'
+    exit 0
+fi
+
+# Simulate checking the exact release tag after checkout.
 if [[ "${1:-}" == -C && "${3:-}" == describe ]]; then
     printf '%s\n' "${MOCK_CLONE_TAG:-v1.2.3}"
     exit 0
@@ -360,8 +389,24 @@ test_prompted_token_and_https_clone() {
     assert_contains "$MOCK_LOG" "gh auth status --hostname github.com GH_TOKEN_PRESENT"
     assert_contains "$MOCK_LOG" "gh repo view plexosoft/self-hosted-ai-assistant --json nameWithOwner --jq .nameWithOwner GH_TOKEN_PRESENT"
     assert_contains "$MOCK_LOG" "gh api repos/plexosoft/self-hosted-ai-assistant/releases/latest --jq .tag_name GH_TOKEN_PRESENT"
-    assert_contains "$MOCK_LOG" "git -c credential.helper= -c credential.helper=!gh auth git-credential clone --branch v1.2.3 --single-branch https://github.com/plexosoft/self-hosted-ai-assistant.git $BOOTSTRAP_DEST"
-    assert_contains "$CASE_DIR/output.log" "Selected stable release: v1.2.3"
+    assert_contains "$MOCK_LOG" "clone --no-checkout"
+    assert_contains "$MOCK_LOG" \
+        "https://github.com/plexosoft/self-hosted-ai-assistant.git"
+
+    assert_contains "$MOCK_LOG" \
+        "fetch --force origin refs/tags/$MOCK_LATEST_TAG:refs/tags/$MOCK_LATEST_TAG"
+
+    assert_contains "$MOCK_LOG" \
+        "rev-parse $MOCK_LATEST_TAG"
+
+    assert_contains "$MOCK_LOG" \
+        "checkout --detach 0123456789abcdef0123456789abcdef01234567"
+
+    assert_contains "$MOCK_LOG" \
+        "describe --tags --exact-match HEAD"
+
+    assert_contains "$CASE_DIR/output.log" \
+        "Selected stable release: $MOCK_LATEST_TAG"
     assert_contains "$MOCK_LOG" "mock clone completed"
     assert_contains "$CASE_DIR/output.log" "Installation skipped"
     assert_not_contains "$MOCK_LOG" "$token"
@@ -470,7 +515,9 @@ test_clone_failure() {
     run_bootstrap $'valid-token\n' || status=$?
 
     assert_failure "bootstrap fails when cloning fails" "$status"
-    assert_contains "$MOCK_LOG" "git -c credential.helper= -c credential.helper=!gh auth git-credential clone --branch v1.2.3 --single-branch https://github.com/plexosoft/self-hosted-ai-assistant.git $BOOTSTRAP_DEST"
+    assert_contains "$MOCK_LOG" "clone --no-checkout"
+    assert_contains "$MOCK_LOG" \
+        "https://github.com/plexosoft/self-hosted-ai-assistant.git"
     assert_not_contains "$MOCK_LOG" "installer ran"
     assert_not_contains "$CASE_DIR/output.log" "Repository cloned to:"
     if [[ ! -e "$BOOTSTRAP_DEST" ]]; then
@@ -485,13 +532,21 @@ test_clone_failure() {
 test_specific_stable_release_override() {
     echo "== Explicit version selects and validates the requested stable release =="
     setup version-override
-    export MOCK_CLONE_TAG=v1.1.0
+    export MOCK_CLONE_TAG="$MOCK_STABLE_TAG"
     local status=0
-    run_bootstrap $'valid-token\nn\n' "--version v1.1.0" || status=$?
+    run_bootstrap $'valid-token\nn\n' "--version $MOCK_STABLE_TAG" || status=$?
     assert_success "bootstrap accepts a published stable version override" "$status"
-    assert_contains "$MOCK_LOG" "gh api repos/plexosoft/self-hosted-ai-assistant/releases/tags/v1.1.0"
-    assert_contains "$MOCK_LOG" "clone --branch v1.1.0 --single-branch"
-    assert_contains "$CASE_DIR/output.log" "Selected stable release: v1.1.0"
+    assert_contains "$MOCK_LOG" \
+        "gh api repos/plexosoft/self-hosted-ai-assistant/releases/tags/$MOCK_STABLE_TAG"
+
+    assert_contains "$MOCK_LOG" \
+        "fetch --force origin refs/tags/$MOCK_STABLE_TAG:refs/tags/$MOCK_STABLE_TAG"
+
+    assert_contains "$MOCK_LOG" \
+        "rev-parse $MOCK_STABLE_TAG"
+
+    assert_contains "$CASE_DIR/output.log" \
+        "Selected stable release: $MOCK_STABLE_TAG"
 }
 
 test_prerelease_override_rejected() {
@@ -499,7 +554,7 @@ test_prerelease_override_rejected() {
     setup prerelease-override
     export MOCK_RELEASE_PRERELEASE=true
     local status=0
-    run_bootstrap $'valid-token\n' "--version v1.1.0" || status=$?
+    run_bootstrap $'valid-token\n' "--version $MOCK_STABLE_TAG" || status=$?
     assert_failure "bootstrap rejects a prerelease version" "$status"
     assert_contains "$CASE_DIR/output.log" "is a prerelease"
     assert_not_contains "$MOCK_LOG" "docker compose version"
@@ -511,7 +566,7 @@ test_draft_override_rejected() {
     setup draft-override
     export MOCK_RELEASE_DRAFT=true
     local status=0
-    run_bootstrap $'valid-token\n' "--version v1.1.0" || status=$?
+    run_bootstrap $'valid-token\n' "--version $MOCK_STABLE_TAG" || status=$?
     assert_failure "bootstrap rejects a draft release" "$status"
     assert_contains "$CASE_DIR/output.log" "is a draft"
     assert_not_contains "$MOCK_LOG" "docker compose version"
