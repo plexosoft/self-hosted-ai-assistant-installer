@@ -12,10 +12,79 @@ readonly DOCKER_GPG_URL="https://download.docker.com/linux/ubuntu/gpg"
 readonly DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
 INSTALL_USER="$(id -un)"
 DOCKER_GROUP_ACTIVE=0
+RELEASE_VERSION=""
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 fail() { printf '[bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: bootstrap.sh [--version TAG] [--help]
+
+Options:
+  --version TAG  Install a specific published stable GitHub Release.
+                 Defaults to the latest published stable release.
+  --help         Show this help message.
+USAGE
+}
+
+parse_arguments() {
+    while (($#)); do
+        case "$1" in
+            --version)
+                (($# >= 2)) || fail "--version requires a release tag, for example v1.1.0."
+                [[ -n "$2" ]] || fail "Release version cannot be empty."
+                RELEASE_VERSION="$2"
+                shift 2
+                ;;
+            --version=*)
+                RELEASE_VERSION="${1#*=}"
+                [[ -n "$RELEASE_VERSION" ]] || fail "Release version cannot be empty."
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                fail "Unknown argument: $1. Use --help to see supported options."
+                ;;
+        esac
+    done
+}
+
+validate_release_tag_format() {
+    local tag="$1"
+    [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$tag" != *..* ]] ||
+        fail "Invalid release tag format: ${tag}"
+}
+
+select_release_tag() {
+    local release_data tag draft prerelease
+
+    if [[ -n "$RELEASE_VERSION" ]]; then
+        validate_release_tag_format "$RELEASE_VERSION"
+        printf '[bootstrap] Validating requested stable release: %s\n' "$RELEASE_VERSION" >&2
+        if ! release_data="$(gh api "repos/${REPOSITORY}/releases/tags/${RELEASE_VERSION}" \
+            --jq '[.tag_name, (.draft | tostring), (.prerelease | tostring)] | @tsv' 2>/dev/null)"; then
+            fail "Release ${RELEASE_VERSION} was not found or is not accessible in ${REPOSITORY}."
+        fi
+        IFS=$'\t' read -r tag draft prerelease <<< "$release_data"
+        [[ "$tag" == "$RELEASE_VERSION" ]] || fail "GitHub returned a different tag than requested."
+        [[ "$draft" == false ]] || fail "Release ${RELEASE_VERSION} is a draft and cannot be installed."
+        [[ "$prerelease" == false ]] || fail "Release ${RELEASE_VERSION} is a prerelease and cannot be installed."
+    else
+        printf '[bootstrap] Resolving the latest published stable release...\n' >&2
+        if ! tag="$(gh api "repos/${REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null)"; then
+            fail "No published stable release is available for ${REPOSITORY}. Publish a stable GitHub Release first."
+        fi
+        [[ -n "$tag" ]] || fail "GitHub returned an empty latest release tag."
+        validate_release_tag_format "$tag"
+    fi
+
+    printf '%s\n' "$tag"
+}
 
 confirm() {
     local prompt="$1" reply
@@ -89,6 +158,7 @@ ensure_docker_group_access() {
 
     sudo usermod -aG docker "$INSTALL_USER"
     DOCKER_GROUP_ACTIVE=0
+RELEASE_VERSION=""
     log "Added ${INSTALL_USER} to the docker group."
     log "Docker group access normally takes effect at the next login; bootstrap will use 'sg docker' for this installation run."
 }
@@ -146,44 +216,30 @@ install_docker() {
 }
 
 authenticate_github() {
-    log "Checking GitHub CLI authentication..."
+    log "GitHub authentication is required for ${REPOSITORY}."
 
-    if [[ -n "${GH_TOKEN:-}" ]]; then
-        log "Using the GitHub token supplied through GH_TOKEN."
-    elif gh auth status --hostname github.com >/dev/null 2>&1; then
-        log "Existing GitHub CLI authentication is available."
+    # Prefer an explicitly supplied token; otherwise prompt securely even if
+    # gh has a saved login. A saved login may use SSH or lack repository access.
+    if [[ -z "${GH_TOKEN:-}" ]]; then
+        [[ -t 0 ]] || fail "A fine-grained GitHub token is required. Run this script interactively or provide GH_TOKEN in the environment."
+        local entered_token
+        printf 'Create a fine-grained PAT with Contents: Read-only access to %s.\n' "$REPOSITORY"
+        read -rsp "GitHub fine-grained token: " entered_token
+        printf '\n'
+        [[ -n "$entered_token" ]] || fail "No token supplied."
+        export GH_TOKEN="$entered_token"
+        unset entered_token
     else
-        log "No valid GitHub.com authentication was found."
-        printf 'Choose a GitHub authentication method:\n'
-        printf '  1) Fine-grained personal access token (PAT)\n'
-        printf '  2) Browser/device authentication\n'
-
-        local auth_choice
-        read -r -p "Select [1/2]: " auth_choice
-
-        case "$auth_choice" in
-            1)
-                local entered_token
-                read -rsp "GitHub fine-grained token: " entered_token
-                printf '\n'
-                [[ -n "$entered_token" ]] || fail "No token supplied."
-                export GH_TOKEN="$entered_token"
-                unset entered_token
-                ;;
-            2)
-                gh auth login --hostname github.com --git-protocol https --web
-                ;;
-            *)
-                fail "Invalid authentication choice."
-                ;;
-        esac
+        log "Using the GitHub token supplied through GH_TOKEN."
     fi
 
     gh auth status --hostname github.com >/dev/null 2>&1 ||
-        fail "GitHub authentication failed. Check the token, repository access, and any organization approval requirements."
+        fail "GitHub token validation failed. Check that the token is valid, has access to ${REPOSITORY}, and has any required organization approval."
 }
 
 main() {
+    parse_arguments "$@"
+
     if [[ -n "${CODESPACES:-}" || -n "${CODESPACE_NAME:-}" ]]; then
         fail "This bootstrap installs software on a host system and cannot run inside GitHub Codespaces."
     fi
@@ -206,6 +262,10 @@ main() {
     fi
     [[ "$accessible_repository" == "$REPOSITORY" ]] || fail "GitHub returned an unexpected repository identity; refusing to continue."
 
+    local release_tag
+    release_tag="$(select_release_tag)"
+    log "Selected stable release: ${release_tag}"
+
     install_docker
 
     local destination
@@ -216,32 +276,33 @@ main() {
     [[ ! -e "$destination" ]] || fail "Destination already exists: $destination. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
     mkdir -p "$(dirname "$destination")"
 
-    log "Cloning the private repository..."
-    gh repo clone "$REPOSITORY" "$destination"
+    log "Cloning the private repository over HTTPS..."
+    # Do not use `gh repo clone` here: its configured git_protocol may be SSH,
+    # which fails on hosts that have a GitHub CLI/PAT login but no SSH key.
+    # Configure the credential helper for this Git invocation only so the
+    # current GH_TOKEN or stored gh authentication can authorize the HTTPS clone
+    # without embedding a token in the URL or changing global Git configuration.
+    git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+        clone --branch "$release_tag" --single-branch \
+        "https://github.com/${REPOSITORY}.git" "$destination"
     [[ -d "$destination/.git" ]] || fail "Clone did not create a Git checkout at $destination."
+
+    local checked_out_tag
+    if ! checked_out_tag="$(git -C "$destination" describe --tags --exact-match HEAD 2>/dev/null)"; then
+        fail "The cloned checkout is not positioned at an exact Git tag. Refusing to install."
+    fi
+    [[ "$checked_out_tag" == "$release_tag" ]] ||
+        fail "The cloned tag (${checked_out_tag}) does not match the selected release (${release_tag})."
     [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
 
-    log "Repository cloned to: $destination"
+    log "Repository release ${release_tag} cloned to: $destination"
 
-    # Remove environment-based authentication before inspecting stored credentials.
-    # This does not modify the caller's parent shell environment.
+    # A PAT entered for this run is kept only in this process environment.
+    # Clear it before launching the application installer. Do not log out a
+    # pre-existing gh account or alter the user's stored authentication.
     unset GH_TOKEN || true
 
-    # Log out any stored GitHub CLI account used on this host. This removes local
-    # gh authentication configuration; it does not revoke the token at GitHub.
-    local stored_github_user
-    stored_github_user="$(gh api user --jq .login 2>/dev/null || true)"
-    if [[ -n "$stored_github_user" ]]; then
-        if gh auth logout --hostname github.com --user "$stored_github_user"; then
-            log "Logged out of the stored GitHub CLI session for ${stored_github_user}."
-        else
-            log "WARNING: Could not remove the stored GitHub CLI session for ${stored_github_user}. Check it manually with: gh auth status --hostname github.com"
-        fi
-    else
-        log "No stored GitHub CLI session remains after removing GH_TOKEN from this process."
-    fi
-
-    if confirm "Run the repository installer now? It will pull images, start services, and may download AI models."; then
+    if confirm "Install release ${release_tag} now? It will pull images, start services, and may download AI models."; then
         if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
             (cd "$destination" && ./scripts/install.sh)
         else
