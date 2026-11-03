@@ -13,6 +13,7 @@ readonly DOCKER_REPO_URL="https://download.docker.com/linux/ubuntu"
 INSTALL_USER="$(id -un)"
 DOCKER_GROUP_ACTIVE=0
 RELEASE_VERSION=""
+INSTANCE="production"
 
 log() { printf '[bootstrap] %s\n' "$*"; }
 fail() { printf '[bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -20,9 +21,10 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
     cat <<'USAGE'
-Usage: bootstrap.sh [--version TAG] [--help]
+Usage: bootstrap.sh [--instance production|sandbox] [--version TAG] [--help]
 
 Options:
+  --instance NAME  Select production or sandbox (default: production).
   --version TAG  Install a specific published stable GitHub Release.
                  Defaults to the latest published stable release.
   --help         Show this help message.
@@ -32,6 +34,19 @@ USAGE
 parse_arguments() {
     while (($#)); do
         case "$1" in
+            --instance)
+                (($# >= 2)) || fail "--instance requires production or sandbox."
+                INSTANCE="$2"
+                [[ "$INSTANCE" == "production" || "$INSTANCE" == "sandbox" ]] ||
+                    fail "Invalid instance: ${INSTANCE}. Choose production or sandbox."
+                shift 2
+                ;;
+            --instance=*)
+                INSTANCE="${1#*=}"
+                [[ "$INSTANCE" == "production" || "$INSTANCE" == "sandbox" ]] ||
+                    fail "Invalid instance: ${INSTANCE}. Choose production or sandbox."
+                shift
+                ;;
             --version)
                 (($# >= 2)) || fail "--version requires a release tag, for example v1.1.0."
                 [[ -n "$2" ]] || fail "Release version cannot be empty."
@@ -56,8 +71,8 @@ parse_arguments() {
 
 validate_release_tag_format() {
     local tag="$1"
-    [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$tag" != *..* ]] ||
-        fail "Invalid release tag format: ${tag}"
+    [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
+        fail "Invalid stable release tag format: ${tag}. Expected vMAJOR.MINOR.PATCH."
 }
 
 select_release_tag() {
@@ -84,6 +99,24 @@ select_release_tag() {
     fi
 
     printf '%s\n' "$tag"
+}
+
+resolve_destination() {
+    local default_destination
+
+    if [[ "$INSTANCE" == "sandbox" ]]; then
+        default_destination="${HOME}/self-hosted-ai-assistant-sandbox"
+    else
+        default_destination="${HOME}/self-hosted-ai-assistant"
+    fi
+
+    DESTINATION="${BOOTSTRAP_DEST:-$default_destination}"
+    if [[ "$DESTINATION" == '~/'* ]]; then
+        DESTINATION="${HOME}/${DESTINATION#~/}"
+    fi
+
+    [[ ! -e "$DESTINATION" && ! -L "$DESTINATION" ]] ||
+        fail "Destination already exists: $DESTINATION. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
 }
 
 confirm() {
@@ -158,7 +191,6 @@ ensure_docker_group_access() {
 
     sudo usermod -aG docker "$INSTALL_USER"
     DOCKER_GROUP_ACTIVE=0
-RELEASE_VERSION=""
     log "Added ${INSTALL_USER} to the docker group."
     log "Docker group access normally takes effect at the next login; bootstrap will use 'sg docker' for this installation run."
 }
@@ -239,6 +271,10 @@ authenticate_github() {
 
 main() {
     parse_arguments "$@"
+    if [[ -n "$RELEASE_VERSION" ]]; then
+        validate_release_tag_format "$RELEASE_VERSION"
+    fi
+    resolve_destination
 
     if [[ -n "${CODESPACES:-}" || -n "${CODESPACE_NAME:-}" ]]; then
         fail "This bootstrap installs software on a host system and cannot run inside GitHub Codespaces."
@@ -268,12 +304,7 @@ main() {
 
     install_docker
 
-    local destination
-    destination="${BOOTSTRAP_DEST:-${HOME}/self-hosted-ai-assistant}"
-    if [[ "$destination" == '~/'* ]]; then
-        destination="${HOME}/${destination#~/}"
-    fi
-    [[ ! -e "$destination" ]] || fail "Destination already exists: $destination. Choose another path with BOOTSTRAP_DEST=/path/to/checkout. Nothing was overwritten."
+    local destination="$DESTINATION"
     mkdir -p "$(dirname "$destination")"
 
     log "Cloning the private repository over HTTPS..."
@@ -304,15 +335,15 @@ main() {
 
     if confirm "Install release ${release_tag} now? It will pull images, start services, and may download AI models."; then
         if [[ "$DOCKER_GROUP_ACTIVE" -eq 1 ]]; then
-            (cd "$destination" && ./scripts/install.sh)
+            (cd "$destination" && ./scripts/install.sh --instance "$INSTANCE")
         else
             # Refresh supplementary group membership for this child process only.
             local quoted_destination
             printf -v quoted_destination '%q' "$destination"
-            sg docker -c "cd ${quoted_destination} && exec ./scripts/install.sh"
+            sg docker -c "cd ${quoted_destination} && exec ./scripts/install.sh --instance ${INSTANCE}"
         fi
     else
-        log "Installation skipped. To install later, run: cd '$destination' && ./scripts/install.sh"
+        log "Installation skipped. To install later, run: cd '$destination' && ./scripts/install.sh --instance $INSTANCE"
     fi
 }
 
