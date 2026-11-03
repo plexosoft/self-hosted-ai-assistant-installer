@@ -252,6 +252,9 @@ assert_contains() {
     else
         printf '  FAIL: expected to find: %s\n' "$expected"
         FAIL=$((FAIL + 1))
+        printf '\n--- Actual output from %s ---\n' "$file"
+        cat "$file"
+        printf '%s\n' '--- End actual output ---'
     fi
 }
 
