@@ -303,7 +303,7 @@ run_bootstrap() {
     # read -s runs, causing a false secret-leak failure in output.log.
     {
         sleep 0.5
-        printf '%s' "$input"
+        printf '%s' "$input" 2>/dev/null || true
     } |
         script -qec "bash '$BOOTSTRAP' $args" /dev/null > "$output" 2>&1 ||
         status=$?
@@ -477,7 +477,7 @@ test_invalid_version_format_rejected() {
     local status=0
     run_bootstrap $'valid-token\n' "--version ../main" || status=$?
     assert_failure "bootstrap rejects an unsafe release tag" "$status"
-    assert_contains "$CASE_DIR/output.log" "Invalid release tag format"
+    assert_contains "$CASE_DIR/output.log" "Invalid stable release tag format"
     assert_not_contains "$MOCK_LOG" "docker compose version"
     assert_not_contains "$MOCK_LOG" "git -c"
 }
