@@ -125,32 +125,69 @@ MOCK
     cat > "$MOCK_BIN/git" <<'MOCK'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 printf 'git %s\n' "$*" >> "$MOCK_LOG"
-if [[ "${1:-}" == -c && "${2:-}" == credential.helper= && "${3:-}" == '-c' && "${4:-}" == 'credential.helper=!gh auth git-credential' && "${5:-}" == clone ]]; then
-    [[ "${6:-}" == --branch && "${7:-}" == "${MOCK_CLONE_TAG:-v1.2.3}" && "${8:-}" == --single-branch ]] || exit 93
+
+# Mock HTTPS clone.
+if [[ "${1:-}" == -c &&
+      "${2:-}" == credential.helper= &&
+      "${3:-}" == '-c' &&
+      "${4:-}" == 'credential.helper=!gh auth git-credential' &&
+      "${5:-}" == clone ]]; then
+
+    [[ "${6:-}" == --branch &&
+       "${7:-}" == "${MOCK_CLONE_TAG:-v1.2.3}" &&
+       "${8:-}" == --single-branch ]] || exit 93
+
     [[ "${9:-}" == 'https://github.com/plexosoft/self-hosted-ai-assistant.git' ]] || exit 94
     [[ -n "${10:-}" && "${10:-}" == "$BOOTSTRAP_DEST" ]] || exit 95
-    if [[ "${MOCK_CLONE_STATUS:-0}" -ne 0 ]]; then exit "$MOCK_CLONE_STATUS"; fi
+
+    if [[ "${MOCK_CLONE_STATUS:-0}" -ne 0 ]]; then
+        exit "$MOCK_CLONE_STATUS"
+    fi
+
     mkdir -p "${10}/.git" "${10}/scripts"
+
     cat > "${10}/scripts/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 printf 'installer ran\n' >> "$MOCK_LOG"
+
 if [[ -n "${GH_TOKEN:-}" ]]; then
     printf 'GH_TOKEN_PRESENT in installer\n' >> "$MOCK_LOG"
 else
     printf 'GH_TOKEN_ABSENT in installer\n' >> "$MOCK_LOG"
 fi
+
 exit "${MOCK_INSTALLER_STATUS:-0}"
 INSTALL
-    chmod +x "${10}/scripts/install.sh"
+
+    # Simulate either correct or incorrect executable permissions.
+    if [[ "${MOCK_INSTALLER_EXECUTABLE:-yes}" == yes ]]; then
+        chmod +x "${10}/scripts/install.sh"
+    else
+        chmod 600 "${10}/scripts/install.sh"
+    fi
+
     printf 'mock clone completed\n' >> "$MOCK_LOG"
     exit 0
 fi
+
+# Mock release tag validation.
 if [[ "${1:-}" == -C && "${3:-}" == describe ]]; then
     printf '%s\n' "${MOCK_CLONE_TAG:-v1.2.3}"
     exit 0
 fi
+
+# Mock local Git configuration.
+if [[ "${1:-}" == -C &&
+      "${3:-}" == config &&
+      "${4:-}" == core.filemode &&
+      "${5:-}" == false ]]; then
+    exit 0
+fi
+
 printf 'Unexpected git invocation: %s\n' "$*" >&2
 exit 92
 MOCK
@@ -340,6 +377,28 @@ test_prompted_token_and_https_clone() {
     fi
 }
 
+test_non_executable_installer_permissions_repaired() {
+    echo "== Non-executable installer permissions are repaired automatically =="
+    setup non-executable-installer
+
+    export MOCK_INSTALLER_EXECUTABLE=no
+
+    local status=0
+    run_bootstrap $'valid-token\nn\n' || status=$?
+
+    assert_success "bootstrap repairs installer permissions and completes" "$status"
+    assert_contains "$CASE_DIR/output.log" "Corrected executable permissions"
+    assert_contains "$CASE_DIR/output.log" "Installation skipped"
+
+    if [[ -x "$BOOTSTRAP_DEST/scripts/install.sh" ]]; then
+        printf '  PASS: installer is executable after permission repair\n'
+        PASS=$((PASS + 1))
+    else
+        printf '  FAIL: installer is not executable after permission repair\n'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 test_invalid_token_stops_early() {
     echo "== Invalid token prevents repository access, Docker setup, and cloning =="
     setup invalid-token
@@ -525,6 +584,7 @@ test_installer_failure_propagates() {
 }
 
 test_prompted_token_and_https_clone
+test_non_executable_installer_permissions_repaired
 test_invalid_token_stops_early
 test_repository_access_failure
 test_unexpected_repository_identity

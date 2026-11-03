@@ -324,7 +324,39 @@ main() {
     fi
     [[ "$checked_out_tag" == "$release_tag" ]] ||
         fail "The cloned tag (${checked_out_tag}) does not match the selected release (${release_tag})."
-    [[ -x "$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
+    # Verify that the main installer exists and is readable.
+    [[ -f "$destination/scripts/install.sh" && -r "$destination/scripts/install.sh" ]] ||
+        fail "The repository was cloned, but scripts/install.sh is missing or unreadable. Review the checkout: $destination"
+
+    # Detect shell scripts that need executable permissions.
+    local script permissions_need_repair=0
+
+    for script in "$destination"/scripts/*.sh; do
+        [[ -f "$script" ]] || continue
+
+        if [[ ! -x "$script" ]]; then
+            permissions_need_repair=1
+            break
+        fi
+    done
+
+    # Repair permissions without making the release checkout appear dirty.
+    if [[ "$permissions_need_repair" -eq 1 ]]; then
+        git -C "$destination" config core.filemode false ||
+            fail "Could not configure Git file mode handling."
+
+        for script in "$destination"/scripts/*.sh; do
+            [[ -f "$script" ]] || continue
+
+            chmod u+x "$script" ||
+                fail "Could not make installation script executable: $script"
+        done
+
+        log "Corrected executable permissions for application scripts."
+    fi
+
+    [[ -x "$destination/scripts/install.sh" ]] ||
+        fail "scripts/install.sh is still not executable: $destination""$destination/scripts/install.sh" ]] || fail "The repository was cloned, but scripts/install.sh is missing or not executable. Review the checkout: $destination"
 
     log "Repository release ${release_tag} cloned to: $destination"
 
