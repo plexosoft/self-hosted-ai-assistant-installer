@@ -348,6 +348,27 @@ main() {
     [[ -f "$destination/scripts/install.sh" && -r "$destination/scripts/install.sh" ]] ||
         fail "The repository was cloned, but scripts/install.sh is missing or unreadable. Review the checkout: $destination"
 
+    # Configure a repository-local shortcut for updating to the latest stable release.
+    log "Configuring Git release update shortcut..."
+
+    git -C "$destination" config --local alias.uprelease \
+        '!f() {
+            gh auth status --hostname github.com >/dev/null 2>&1 || {
+                printf "GitHub CLI is not authenticated. Run: gh auth login\n" >&2
+                exit 1
+            }
+
+            tag="$(gh api repos/plexosoft/self-hosted-ai-assistant/releases/latest --jq .tag_name)" || exit 1
+
+            git -c credential.helper= \
+                -c "credential.helper=!gh auth git-credential" \
+                fetch origin "+refs/tags/${tag}:refs/tags/${tag}" &&
+            git switch --detach "$tag"
+        }; f' ||
+        fail "Could not configure the release update shortcut."
+
+    log "Git release update shortcut configured: git uprelease"
+
     # Detect shell scripts that need executable permissions.
     local script permissions_need_repair=0
 
