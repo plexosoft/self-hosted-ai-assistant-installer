@@ -209,7 +209,17 @@ if [[ "${1:-}" == -C && "${3:-}" == describe ]]; then
     exit 0
 fi
 
-# Mock local Git configuration.
+# Mock repository-local Git configuration.
+if [[ "${1:-}" == -C &&
+      "${3:-}" == config &&
+      "${4:-}" == --local &&
+      "${5:-}" == alias.uprelease ]]; then
+    [[ -n "${6:-}" ]] || exit 91
+    printf 'release update alias configured\n' >> "$MOCK_LOG"
+    exit 0
+fi
+
+# Mock Git file mode configuration.
 if [[ "${1:-}" == -C &&
       "${3:-}" == config &&
       "${4:-}" == core.filemode &&
@@ -408,6 +418,9 @@ test_prompted_token_and_https_clone() {
     assert_contains "$CASE_DIR/output.log" \
         "Selected stable release: $MOCK_LATEST_TAG"
     assert_contains "$MOCK_LOG" "mock clone completed"
+    assert_contains "$MOCK_LOG" "release update alias configured"
+    assert_contains "$CASE_DIR/output.log" \
+    "Git release update shortcut configured: git uprelease"
     assert_contains "$CASE_DIR/output.log" "Installation skipped"
     assert_not_contains "$MOCK_LOG" "$token"
     assert_not_contains "$CASE_DIR/output.log" "$token"
